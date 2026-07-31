@@ -1,0 +1,36 @@
+# 配置模板。复制为 config.yaml 后按部署环境修改；config.yaml 不入库。
+
+server:
+  host: "0.0.0.0"
+  port: 21010
+  log_level: INFO                 # DEBUG | INFO | WARNING | ERROR
+
+# 默认推理模型，对应 models[].key
+default_model: yolo-detect
+
+models:
+  - key: yolo-detect              # 模型唯一标识，请求参数 model_key 使用该值
+    name: YOLO Detect             # 展示名称
+    task: detect                  # detect：目标检测；segment：实例分割
+    # 权重文件绝对路径。Ultralytics 支持 .pt；也可指向导出后的 .onnx
+    path: "/path/to/your-detect.pt"
+    device: "cuda:0"              # 推理设备，如 cuda:0 / cpu
+    conf: 0.25                    # 置信度阈值，低于该值的框将被过滤
+    iou: 0.45                     # NMS IoU 阈值，抑制重叠框
+    imgsz: 1280                   # 推理输入边长（像素），长边缩放到该尺度
+    max_det: 300                  # 单图最大保留检测数
+
+  # 分割模型配置示例
+  # - key: yolo-seg
+  #   name: YOLO Seg
+  #   task: segment
+  #   path: "/path/to/your-seg.pt"
+  #   device: "cuda:0"
+  #   conf: 0.25
+  #   iou: 0.45
+  #   imgsz: 1280
+  #   max_det: 300
+
+inference:
+  # 输出坐标系：pixel=原图像素；norm1000=线性映射到 [0, 1000]
+  coord_space: pixel

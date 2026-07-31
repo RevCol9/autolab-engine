@@ -1,0 +1,43 @@
+# docs / readme（本地维护，不入库）
+README.md
+README*.md
+docs/
+
+# local config / secrets
+.env
+.env.*
+!.env.example
+config.yaml
+config.local.yaml
+
+# python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.venv/
+venv/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+
+# ide / os
+.idea/
+.vscode/
+.DS_Store
+
+# runtime
+*.log
+logs/
+tmp/
+uploads/
+outputs/
+
+# weights
+weights/**
+!weights/.gitkeep
+*.pt
+*.pth
+*.onnx
+*.engine
+*.ckpt
