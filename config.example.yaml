@@ -34,3 +34,20 @@ models:
 inference:
   # 输出坐标系：pixel=原图像素；norm1000=线性映射到 [0, 1000]
   coord_space: pixel
+
+gpu:
+  cuda_visible_devices: "0"
+
+locate:
+  dtype: float16
+  local_files_only: true
+  in_token_limit: 4096
+  max_image_side: 1280
+  generation_mode: hybrid
+  max_new_tokens: 512
+  temperature: 0.0
+
+postprocess:
+  enable: true
+  nms_iou: 0.5
+  max_boxes: 32

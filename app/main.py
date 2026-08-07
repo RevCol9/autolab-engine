@@ -16,13 +16,15 @@ from app.box_format import SUPPORTED_BOX_FORMATS, apply_box_format
 from app.engines.base import BaseEngine
 from app.engines.yolo import YoloDetectEngine, YoloSegmentEngine
 from app.logging_setup import setup_logging
-from app.settings import ModelConfig, Settings, load_settings
+from app.settings import ModelConfig, Settings, apply_runtime_env, load_settings
+from app.test_ui import test_page
 
 SETTINGS: Settings = load_settings()
+apply_runtime_env(SETTINGS)
 setup_logging(SETTINGS.log_level)
 logger = logging.getLogger("autolab-engine")
 
-app = FastAPI(title="autolab-engine", version="0.1.1")
+app = FastAPI(title="autolab-engine", version="0.2.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -31,8 +33,14 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+VLM_ENGINES = frozenset({"locateanything", "sam3"})
 _engines: Dict[str, BaseEngine] = {}
 _active_key: Optional[str] = None
+
+
+def is_vlm_engine(cfg: ModelConfig) -> bool:
+    return (cfg.engine or "yolo").lower() in VLM_ENGINES
+
 
 # 单次批量上限，避免一次占满显存/超时
 BATCH_MAX_IMAGES = 32
@@ -51,6 +59,15 @@ def get_model_config(model_key: Optional[str]) -> ModelConfig:
 
 
 def build_engine(config: ModelConfig) -> BaseEngine:
+    eng = (config.engine or "yolo").lower()
+    if eng == "locateanything":
+        from app.engines.locate_engine import LocateEngine
+
+        return LocateEngine(config, SETTINGS)
+    if eng == "sam3":
+        from app.engines.sam3_engine import Sam3Engine
+
+        return Sam3Engine(config, SETTINGS)
     task = (config.task or "detect").lower()
     if task == "detect":
         return YoloDetectEngine(config)
@@ -59,7 +76,7 @@ def build_engine(config: ModelConfig) -> BaseEngine:
     raise HTTPException(status_code=400, detail=f"不支持的 task: {task}")
 
 
-def ensure_engine(model_key: Optional[str] = None) -> BaseEngine:
+def ensure_model_engine(model_key: Optional[str] = None) -> BaseEngine:
     global _active_key
     cfg = get_model_config(model_key)
     if cfg.key in _engines:
@@ -68,7 +85,7 @@ def ensure_engine(model_key: Optional[str] = None) -> BaseEngine:
     if not cfg.path:
         raise HTTPException(
             status_code=503,
-            detail=f"模型 {cfg.key} 尚未配置权重路径（models[].path 为空）",
+            detail=f"模型 {cfg.key} 尚未配置路径（models[].path 为空）",
         )
     engine = build_engine(cfg)
     engine.load()
@@ -104,8 +121,44 @@ def _run_predict(
     iou: Optional[float],
     imgsz: Optional[int],
     box_format: str,
+    task: Optional[str] = None,
+    categories: str = "",
+    phrase: str = "",
+    sam3_threshold: Optional[float] = None,
+    sam3_points: Optional[str] = None,
+    sam3_boxes: Optional[str] = None,
 ) -> Dict[str, Any]:
-    engine = ensure_engine(cfg.key)
+    if is_vlm_engine(cfg):
+        try:
+            engine = ensure_model_engine(cfg.key)
+            result = engine.predict(
+                img,
+                task=task,
+                categories=categories,
+                phrase=phrase,
+                sam3_threshold=sam3_threshold,
+                sam3_points=sam3_points,
+                sam3_boxes=sam3_boxes,
+                conf=conf,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        w = int(result.get("image_width") or img.width)
+        h = int(result.get("image_height") or img.height)
+        result["boxes"] = apply_box_format(
+            result.get("boxes") or [],
+            image_width=w,
+            image_height=h,
+            box_format=box_format,
+            coord_space="pixel",
+        )
+        result["box_format"] = box_format
+        result["model_key"] = cfg.key
+        result["model_name"] = cfg.name
+        result["engine"] = cfg.engine
+        return result
+
+    engine = ensure_model_engine(cfg.key)
     result = engine.predict(
         img,
         conf=conf,
@@ -113,6 +166,7 @@ def _run_predict(
         imgsz=imgsz,
         coord_space=SETTINGS.coord_space,
     )
+    result["engine"] = "yolo"
     result["boxes"] = apply_box_format(
         result.get("boxes") or [],
         image_width=int(result.get("image_width") or img.width),
@@ -155,17 +209,25 @@ def on_startup() -> None:
         SETTINGS.default_model,
     )
     default = get_model_config(None)
-    if default.path:
+    if default.path and not is_vlm_engine(default):
         try:
-            ensure_engine(default.key)
+            ensure_model_engine(default.key)
             logger.info("ready   model=%s | http://0.0.0.0:%s", default.key, SETTINGS.port)
         except Exception as exc:
             logger.warning("startup skip load: %s", exc)
             logger.info("ready   (lazy load) | http://0.0.0.0:%s", SETTINGS.port)
+    elif default.path and is_vlm_engine(default):
+        logger.info("ready   default=%s (vlm lazy) | http://0.0.0.0:%s", default.key, SETTINGS.port)
     else:
-        logger.warning("default model path empty; waiting for config.yaml weights path")
+        logger.warning("default model path empty; waiting for config.yaml")
         logger.info("ready   (no weights yet) | http://0.0.0.0:%s", SETTINGS.port)
     logger.info("------------------------------------")
+
+
+@app.get("/test", include_in_schema=True)
+def test_inference_page():
+    """浏览器联调：选 model_key、上传图片、查看 JSON 与框预览。"""
+    return test_page()
 
 
 @app.get("/api/health")
@@ -180,6 +242,7 @@ def health() -> dict:
                 "key": m.key,
                 "name": m.name,
                 "task": m.task,
+                "engine": m.engine,
                 "path_configured": bool(m.path),
                 "loaded": m.key in _engines,
             }
@@ -200,6 +263,7 @@ def models() -> dict:
                 "key": m.key,
                 "name": m.name,
                 "task": m.task,
+                "engine": m.engine,
                 "path": m.path,
                 "device": m.device,
                 "conf": m.conf,
@@ -215,11 +279,13 @@ def models() -> dict:
 
 @app.post("/api/models/{model_key}/load")
 def load_model(model_key: str) -> dict:
-    """显式将指定模型加载到 GPU（半自动标注切换「当前基线 PT」时可预热）。"""
+    """显式将指定模型加载到 GPU。"""
     t0 = time.perf_counter()
     cfg = get_model_config(model_key)
     try:
-        ensure_engine(cfg.key)
+        ensure_model_engine(cfg.key)
+    except HTTPException:
+        raise
     except FileNotFoundError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     except Exception as exc:
@@ -232,6 +298,7 @@ def load_model(model_key: str) -> dict:
         "model_key": cfg.key,
         "model_name": cfg.name,
         "task": cfg.task,
+        "engine": cfg.engine,
         "device": cfg.device,
         "loaded": list(_engines.keys()),
         "timings": {"load": cost},
@@ -246,8 +313,14 @@ async def predict(
     iou: Optional[float] = Form(None),
     imgsz: Optional[int] = Form(None),
     box_format: Optional[str] = Form("xyxy"),
+    task: Optional[str] = Form(None),
+    categories: str = Form(""),
+    phrase: str = Form(""),
+    sam3_threshold: Optional[float] = Form(None),
+    sam3_points: Optional[str] = Form(None),
+    sam3_boxes: Optional[str] = Form(None),
 ) -> dict:
-    """单图推理。对应平台「生成建议」。"""
+    """单图推理。YOLO、LocateAnything 或 SAM3（同进程加载）。"""
     t0 = time.perf_counter()
     fmt = _normalize_box_format(box_format)
     raw = await image.read()
@@ -257,9 +330,24 @@ async def predict(
     logger.info("req  %s | %s | %sx%s | fmt=%s", cfg.key, filename, img.width, img.height, fmt)
 
     try:
-        result = _run_predict(img, cfg, conf=conf, iou=iou, imgsz=imgsz, box_format=fmt)
+        result = _run_predict(
+            img,
+            cfg,
+            conf=conf,
+            iou=iou,
+            imgsz=imgsz,
+            box_format=fmt,
+            task=task,
+            categories=categories,
+            phrase=phrase,
+            sam3_threshold=sam3_threshold,
+            sam3_points=sam3_points,
+            sam3_boxes=sam3_boxes,
+        )
     except NotImplementedError as exc:
         raise HTTPException(status_code=501, detail=str(exc)) from exc
+    except HTTPException:
+        raise
     except FileNotFoundError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     except Exception as exc:
@@ -302,11 +390,15 @@ async def predict_batch(
 
     ids = _parse_image_ids(image_ids, n)
     cfg = get_model_config(model_key)
+    if is_vlm_engine(cfg):
+        raise HTTPException(
+            status_code=400,
+            detail=f"模型 {cfg.key} 为 Locate/SAM3，请用单图 /api/predict（带 phrase/categories），暂不支持 batch",
+        )
     logger.info("batch %s | n=%s | fmt=%s", cfg.key, n, fmt)
 
-    # 预加载，避免第一张才报 path 错误
     try:
-        ensure_engine(cfg.key)
+        ensure_model_engine(cfg.key)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     except NotImplementedError as exc:
@@ -320,7 +412,14 @@ async def predict_batch(
         try:
             raw = await up.read()
             img = _parse_image(raw, filename)
-            one = _run_predict(img, cfg, conf=conf, iou=iou, imgsz=imgsz, box_format=fmt)
+            one = _run_predict(
+                img,
+                cfg,
+                conf=conf,
+                iou=iou,
+                imgsz=imgsz,
+                box_format=fmt,
+            )
             item.update(
                 {
                     "ok": True,

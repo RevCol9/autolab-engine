@@ -1,0 +1,17 @@
+# VLM 依赖（LocateAnything + SAM3）。与 requirements.txt 一并安装：
+#   pip install -r requirements.txt -r requirements-vlm.txt
+#
+# 建议使用 conda 环境 models（与 YOLO 分环境或同环境但勿同时常驻大模型）。
+
+transformers==4.57.1
+accelerate
+peft
+einops
+timm
+tqdm
+decord
+lmdb
+opencv-python-headless
+numpy<2
+
+# SAM3 需本地仓库 /project/kang/vlmmodels/sam3 在 PYTHONPATH（sam3_worker 会自动插入）
