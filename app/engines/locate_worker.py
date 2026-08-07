@@ -117,7 +117,7 @@ class LocateAnythingWorker:
             for idx in range(torch.cuda.device_count()):
                 props = torch.cuda.get_device_properties(idx)
                 free_b, total_b = torch.cuda.mem_get_info(idx)
-                logger.info(
+                logger.debug(
                     "gpu   [%s] %s | free %.1f / %.1f GiB",
                     idx,
                     props.name,
@@ -151,7 +151,7 @@ class LocateAnythingWorker:
         self._sync()
         self.load_seconds = time.perf_counter() - t0
         self._log_cuda_mem("load")
-        logger.info("load  done in %.1fs", self.load_seconds)
+        logger.debug("load  done in %.1fs", self.load_seconds)
 
     def _load_tokenizer(self, model_path: str, local_files_only: bool, device: str) -> None:
         # tokenizer 的 __repr__/内部打印会刷出上千行 AddedToken，加载时吞掉 stdout/stderr 噪音

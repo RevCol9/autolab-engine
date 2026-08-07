@@ -136,7 +136,7 @@ class Sam3Worker:
         from sam3.model_builder import build_sam3_image_model
 
         t0 = time.perf_counter()
-        logger.info("sam3  load checkpoint=%s | device=%s", self.checkpoint, self.device)
+        logger.debug("sam3  load checkpoint=%s | device=%s", self.checkpoint, self.device)
         self.model = build_sam3_image_model(
             checkpoint_path=str(self.checkpoint),
             load_from_HF=False,
@@ -148,7 +148,7 @@ class Sam3Worker:
             confidence_threshold=self.threshold,
         )
         self.load_seconds = time.perf_counter() - t0
-        logger.info("sam3  done in %.1fs", self.load_seconds)
+        logger.debug("sam3  done in %.1fs", self.load_seconds)
 
     def set_threshold(self, threshold: Optional[float]) -> None:
         if threshold is None:

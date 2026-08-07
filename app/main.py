@@ -15,14 +15,12 @@ from PIL import Image
 from app.box_format import SUPPORTED_BOX_FORMATS, apply_box_format
 from app.engines.base import BaseEngine
 from app.engines.yolo import YoloDetectEngine, YoloSegmentEngine
-from app.logging_setup import setup_logging
 from app.settings import ModelConfig, Settings, apply_runtime_env, load_settings
 from app.test_ui import test_page
 
 SETTINGS: Settings = load_settings()
 apply_runtime_env(SETTINGS)
-setup_logging(SETTINGS.log_level)
-logger = logging.getLogger("autolab-engine")
+logger = logging.getLogger(__name__)
 
 app = FastAPI(title="autolab-engine", version="0.2.0")
 app.add_middleware(
@@ -201,27 +199,12 @@ def _parse_image_ids(raw: Optional[str], n: int) -> List[str]:
 
 @app.on_event("startup")
 def on_startup() -> None:
-    logger.info("---------- autolab-engine ----------")
-    logger.info("config  %s", SETTINGS.config_path)
-    logger.info(
-        "models  %s | default=%s",
-        [m.key for m in SETTINGS.models],
-        SETTINGS.default_model,
-    )
     default = get_model_config(None)
     if default.path and not is_vlm_engine(default):
         try:
             ensure_model_engine(default.key)
-            logger.info("ready   model=%s | http://0.0.0.0:%s", default.key, SETTINGS.port)
         except Exception as exc:
-            logger.warning("startup skip load: %s", exc)
-            logger.info("ready   (lazy load) | http://0.0.0.0:%s", SETTINGS.port)
-    elif default.path and is_vlm_engine(default):
-        logger.info("ready   default=%s (vlm lazy) | http://0.0.0.0:%s", default.key, SETTINGS.port)
-    else:
-        logger.warning("default model path empty; waiting for config.yaml")
-        logger.info("ready   (no weights yet) | http://0.0.0.0:%s", SETTINGS.port)
-    logger.info("------------------------------------")
+            logger.warning("startup skip load default=%s: %s", default.key, exc)
 
 
 @app.get("/test", include_in_schema=True)
@@ -292,7 +275,7 @@ def load_model(model_key: str) -> dict:
         logger.exception("load fail %s | %s", cfg.key, exc)
         raise HTTPException(status_code=500, detail=str(exc)) from exc
     cost = time.perf_counter() - t0
-    logger.info("load ok %s | %.2fs", cfg.key, cost)
+    logger.debug("load ok %s | %.2fs", cfg.key, cost)
     return {
         "status": "ok",
         "model_key": cfg.key,
@@ -327,7 +310,14 @@ async def predict(
     filename = getattr(image, "filename", None) or "-"
     img = _parse_image(raw, filename)
     cfg = get_model_config(model_key)
-    logger.info("req  %s | %s | %sx%s | fmt=%s", cfg.key, filename, img.width, img.height, fmt)
+    logger.debug(
+        "predict %s | %s | %sx%s | fmt=%s",
+        cfg.key,
+        filename,
+        img.width,
+        img.height,
+        fmt,
+    )
 
     try:
         result = _run_predict(
@@ -358,7 +348,7 @@ async def predict(
     timings = result.get("timings") or {}
     timings["total"] = total
     result["timings"] = timings
-    logger.info("done %s | boxes=%s | %.2fs", cfg.key, len(result.get("boxes") or []), total)
+    logger.debug("predict done %s | boxes=%s | %.2fs", cfg.key, len(result.get("boxes") or []), total)
     return result
 
 
@@ -395,7 +385,7 @@ async def predict_batch(
             status_code=400,
             detail=f"模型 {cfg.key} 为 Locate/SAM3，请用单图 /api/predict（带 phrase/categories），暂不支持 batch",
         )
-    logger.info("batch %s | n=%s | fmt=%s", cfg.key, n, fmt)
+    logger.debug("batch %s | n=%s | fmt=%s", cfg.key, n, fmt)
 
     try:
         ensure_model_engine(cfg.key)
@@ -440,7 +430,7 @@ async def predict_batch(
         results.append(item)
 
     total = time.perf_counter() - t0
-    logger.info("batch done %s | ok=%s/%s | %.2fs", cfg.key, ok_n, n, total)
+    logger.debug("batch done %s | ok=%s/%s | %.2fs", cfg.key, ok_n, n, total)
     return {
         "model_key": cfg.key,
         "model_name": cfg.name,

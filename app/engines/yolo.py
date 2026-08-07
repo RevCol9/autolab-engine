@@ -45,7 +45,7 @@ class YoloDetectEngine(BaseEngine):
                 self.model.to(device)
             except Exception:
                 pass
-        logger.info(
+        logger.debug(
             "load  %s | task=%s | device=%s | %.2fs",
             path,
             self.config.task,

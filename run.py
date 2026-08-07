@@ -16,6 +16,4 @@ if __name__ == "__main__":
         port=int(SETTINGS.port),
         workers=1,
         log_level=SETTINGS.log_level.lower(),
-        access_log=False,
-        log_config=None,
     )
