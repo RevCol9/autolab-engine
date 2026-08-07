@@ -1,6 +1,7 @@
 # docs / readme（本地维护，不入库）
 README.md
 README*.md
+!niii_training_algorithm/README.md
 docs/
 
 # local config / secrets

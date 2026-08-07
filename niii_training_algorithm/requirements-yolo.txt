@@ -1,0 +1,15 @@
+# 闭环误报微调专用环境（104 使用 mamba env: yolo）
+# closed_loop_train.py 由 yolo_detect.py 通过 subprocess 调用此环境的 Python
+# 104 实测: ultralytics 8.3.241, torch 2.8.0+cu128
+
+ultralytics>=8.3.0,<8.4
+
+# GPU 版 torch 请按 deploy/setup-new-env.md 安装（需与 CUDA 驱动匹配）
+# pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
+
+PyYAML>=6.0
+opencv-python-headless>=4.8
+numpy>=2.0
+pandas>=2.0
+psutil>=5.9
+tqdm>=4.60

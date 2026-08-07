@@ -1,0 +1,547 @@
+
+from django.shortcuts import render
+
+# Create your views here.
+
+from rest_framework import viewsets
+from rest_framework import mixins
+
+from .models import Endpoint
+from .serializers import EndpointSerializer
+
+from .models import MLAlgorithm
+from .serializers import MLAlgorithmSerializer
+
+from .models import MLAlgorithmStatus
+from .serializers import MLAlgorithmStatusSerializer
+
+from .models import MLRequest
+from .serializers import MLRequestSerializer
+
+import json
+from numpy.random import rand
+from rest_framework import views, status
+from rest_framework.response import Response
+from algorithm_model.registry import MLRegistry
+from ML_backend.wsgi import registry
+from algorithm_model.SAM.hqsam import *
+from segment_anything import sam_model_registry, SamPredictor
+
+import yaml
+import cv2
+import numpy as np
+import ctypes
+from threading import Thread
+
+
+class EndpointViewSet(
+    mixins.RetrieveModelMixin, mixins.ListModelMixin, viewsets.GenericViewSet
+):
+    serializer_class = EndpointSerializer
+    queryset = Endpoint.objects.all()
+
+
+class MLAlgorithmViewSet(
+    mixins.RetrieveModelMixin, mixins.ListModelMixin, viewsets.GenericViewSet
+):
+    serializer_class = MLAlgorithmSerializer
+    queryset = MLAlgorithm.objects.all()
+
+
+def deactivate_other_statuses(instance):
+    old_statuses = MLAlgorithmStatus.objects.filter(parent_mlalgorithm = instance.parent_mlalgorithm,
+                                                        created_at__lt=instance.created_at,
+                                                        active=True)
+    for i in range(len(old_statuses)):
+        old_statuses[i].active = False
+    MLAlgorithmStatus.objects.bulk_update(old_statuses, ["active"])
+
+class MLAlgorithmStatusViewSet(
+    mixins.RetrieveModelMixin, mixins.ListModelMixin, viewsets.GenericViewSet,
+    mixins.CreateModelMixin
+):
+    serializer_class = MLAlgorithmStatusSerializer
+    queryset = MLAlgorithmStatus.objects.all()
+    def perform_create(self, serializer):
+        try:
+            with transaction.atomic():
+                instance = serializer.save(active=True)
+                # set active=False for other statuses
+                deactivate_other_statuses(instance)
+
+        except Exception as e:
+            raise APIException(str(e))
+
+class MLRequestViewSet(
+    mixins.RetrieveModelMixin, mixins.ListModelMixin, viewsets.GenericViewSet,
+    mixins.UpdateModelMixin
+):
+    serializer_class = MLRequestSerializer
+    queryset = MLRequest.objects.all()
+
+def txt_to_yaml(labelPath,imagePath,txtfile):
+    data = {
+    'path': '',
+    'train': '',
+    'val': '',
+    'names': {}
+    }
+    data['path'] = labelPath.strip()
+    data['train'] = imagePath.strip()
+    data['val'] = imagePath.strip()
+
+    txt_file = txtfile
+    yaml_file = txtfile[:-3]+ 'yaml'
+
+    with open(txt_file, 'r') as file:
+        i=0
+        for line in file:
+            line = line.strip()
+            if line:
+                data['names'][i] = line.strip()
+            i += 1
+
+    with open(yaml_file, 'w') as file:
+        yaml.dump(data, file)
+
+class ClassifyView(views.APIView):
+    def post(self, request, endpoint_name, format=None):
+
+        algorithm_status = self.request.query_params.get("status", "production")
+        algorithm_version = self.request.query_params.get("version")
+
+        algs = MLAlgorithm.objects.filter(parent_endpoint__name = endpoint_name, status__status = algorithm_status, status__active=True)
+
+        if algorithm_version is not None:
+            algs = algs.filter(version = algorithm_version)
+        
+
+        if len(algs) == 0:
+            return Response(
+                {"status": "Error", "message": "ML algorithm is not available"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if len(algs) != 1 and algorithm_status != "ab_testing":
+            return Response(
+                {"status": "Error", "message": "ML algorithm selection is ambiguous. Please specify algorithm version."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+            
+        
+        alg_index = 0
+        if algorithm_status == "ab_testing":
+            alg_index = 0 if rand() < 0.5 else 1
+
+        # decode request json data
+        param_data = request.data
+        img_source = param_data['image_path']
+        project_id = param_data['projectId']
+        img_source = param_data['taskId']
+        task_id = param_data['weights_path']
+        algorithm_object = registry.endpoints[algs[alg_index].id]
+        # img_source = "D:/zidane.jpg"
+        # weight_path = 'yolov8n.pt'
+        
+        prediction = algorithm_object.compute_prediction(img_source,weight_path)
+        prediction = (list(prediction))
+        response_data = []
+        for i in range(len(prediction)):
+            response_data.append({"result_txt_path":str(prediction[i][0]),"image_size":prediction[i][1],"result":prediction[i][2],"inference_time":prediction[i][3]})
+
+
+        return Response(response_data)
+
+class PredictView(views.APIView):
+    def post(self, request, endpoint_name, format=None):
+
+        algorithm_status = self.request.query_params.get("status", "production")
+        algorithm_version = self.request.query_params.get("version")
+
+        algs = MLAlgorithm.objects.filter(parent_endpoint__name = endpoint_name, status__status = algorithm_status, status__active=True)
+
+        if algorithm_version is not None:
+            algs = algs.filter(version = algorithm_version)
+        
+
+        if len(algs) == 0:
+            return Response(
+                {"status": "Error", "message": "ML algorithm is not available"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if len(algs) != 1 and algorithm_status != "ab_testing":
+            return Response(
+                {"status": "Error", "message": "ML algorithm selection is ambiguous. Please specify algorithm version."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        alg_index = 0
+        if algorithm_status == "ab_testing":
+            alg_index = 0 if rand() < 0.5 else 1
+
+        algorithm_object = registry.endpoints[algs[alg_index].id]
+        prediction = algorithm_object.compute_prediction(request.data)
+        print(prediction)
+
+        label = prediction["label"] if "label" in prediction else "error"
+        ml_request = MLRequest(
+            input_data=json.dumps(request.data),
+            full_response=prediction,
+            response=label,
+            feedback="",
+            parent_mlalgorithm=algs[alg_index],
+        )
+        ml_request.save()
+
+        prediction["request_id"] = ml_request.id
+
+        return Response({"status":"success","results":prediction})
+
+class DetectView(views.APIView):
+    def post(self, request, endpoint_name, format=None):
+
+        algorithm_status = self.request.query_params.get("status", "production")
+        algorithm_version = self.request.query_params.get("version")
+
+        algs = MLAlgorithm.objects.filter(parent_endpoint__name = endpoint_name, status__status = algorithm_status, status__active=True)
+
+        if algorithm_version is not None:
+            algs = algs.filter(version = algorithm_version)
+        
+        if len(algs) == 0:
+            return Response(
+                {"status": "Error", "message": "ML algorithm is not available"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if len(algs) != 1 and algorithm_status != "ab_testing":
+            return Response(
+                {"status": "Error", "message": "ML algorithm selection is ambiguous. Please specify algorithm version."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        
+        alg_index = 0
+        if algorithm_status == "ab_testing":
+            alg_index = 0 if rand() < 0.5 else 1
+
+        # decode request json data
+        param_data = request.data
+        img_source = param_data['image_path']
+        project_id = param_data['projectId']
+        task_id = param_data['taskId']
+        weight_path = param_data['weights_path']
+        algorithm_object = registry.endpoints[algs[alg_index].id]
+        is_video_input = False
+        if 'is_video' in param_data:
+            is_video_input = bool(param_data['is_video'])
+    
+
+        prediction = algorithm_object.compute_prediction(img_source,project_id,task_id,weight_path,is_video_input)
+        prediction = (list(prediction))
+        response_data = []
+        for i in range(len(prediction)):
+            response_data.append({"result_txt_path":str(prediction[i][0]),"image_size":prediction[i][1],"result":prediction[i][2],"inference_time":prediction[i][3]})
+
+
+        return Response({"status":"success","results":prediction})
+
+class TrainThread(Thread):
+    def __init__(self, name,algorithm_id,params):
+        Thread.__init__(self)
+        self.name = name
+        self.algorithm_id = algorithm_id
+        self.param_data = params
+        self.stop_flag = False
+
+    def _raise_exc(self, exc_obj):
+        if not self.is_alive():
+
+            return
+        res = ctypes.pythonapi.PyThreadState_SetAsyncExc(self.ident, ctypes.py_object(exc_obj))
+
+        if res == 0:
+            raise RuntimeError("Not existent thread id.")
+        elif res > 1:
+            ctypes.pythonapi.PyThreadState_SetAsyncExc(self.ident, None)
+            raise SystemError("PyThreadState_SetAsyncExc failed.")
+
+    def kill(self):
+        self._raise_exc(SystemExit)
+
+    def stop_training(self):
+        # 停止训练的方法
+        self.stop_flag = True
+
+    def run(self):
+
+        def callback():
+            # 在训练过程中调用的回调函数
+            if self.stop_flag:
+                # 停止训练的操作
+                self.kill()
+
+        algorithm_object = registry.endpoints[self.algorithm_id]
+
+        txt_file_path = '/niii_machine_version/AI_trainning_platform/storage/'+self.param_data['projectId'] + '/' + self.param_data['taskId'] + '/classes.txt'
+        if self.param_data.get('projectId') == 'algorithms':
+            yaml_base = '/niii_machine_version/AI_trainning_platform/storage/algorithms/' + self.param_data['taskId']
+            image_path = self.param_data['trainNum'] + '/images'
+            txt_to_yaml(yaml_base, image_path, txt_file_path)
+        else:
+            txt_to_yaml('/niii_machine_version/AI_trainning_platform/storage/'+self.param_data['projectId'],"images",txt_file_path)
+        train_result = algorithm_object.train(param=self.param_data, callback=callback)
+        # 移除训练结束后的kill调用，让线程自然结束
+        # self.kill()
+
+class TrainDetectionView(views.APIView):
+    my_thread = None
+
+    def post(self, request, endpoint_name, format=None):
+        if(request.data['action'] == 'start'):
+            algorithm_status = self.request.query_params.get("status", "production")
+            algorithm_version = self.request.query_params.get("version")
+
+            algs = MLAlgorithm.objects.filter(parent_endpoint__name = endpoint_name, status__status = algorithm_status, status__active=True)
+
+            if algorithm_version is not None:
+                algs = algs.filter(version = algorithm_version)
+            
+
+            if len(algs) == 0:
+                return Response(
+                    {"status": "Error", "message": "ML algorithm is not available"},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            if len(algs) != 1 and algorithm_status != "ab_testing":
+                return Response(
+                    {"status": "Error", "message": "ML algorithm selection is ambiguous. Please specify algorithm version."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            alg_index = 0
+            if algorithm_status == "ab_testing":
+                alg_index = 0 if rand() < 0.5 else 1
+
+            param_data = request.data
+            # Fix model name case sensitivity issue
+            if 'model' in param_data:
+                param_data['model'] = param_data['model'].lower()
+            # img_source = param_data['image_path']
+            # weight_path = param_data['weights_path']
+            # param = {epochs':param_data['epochs'],'batch_size':param_data['batch_size'],'model':param_data['model'],
+            #          'imgsz':param_data['image_size']}
+            # algorithm_object = registry.endpoints[algs[alg_index].id]
+            # txt_to_yaml("datasets/coco128/","images",'./runs/detect/classes.txt')
+            # train_result = algorithm_object.train(param=param_data,project_name='test1',task_name='task1')
+            if 'is_continue' in param_data:
+                if param_data['is_continue'] == True:
+                    param_data['model'] = 'D:/niii_machine_version/AI_trainning_platform/' + param_data['last_train'] + "/weights/best.pt"
+
+            TrainDetectionView.my_thread = TrainThread("YoloDetect", algs[alg_index].id, param_data)
+            TrainDetectionView.my_thread.start()
+            return Response({"status":"success"})
+
+        elif(request.data['action'] == 'stop'):            
+            if TrainDetectionView.my_thread is not None:
+                print(" Trainning interruped by user !!!")
+                TrainDetectionView.my_thread.stop_training()
+                TrainDetectionView.my_thread.kill()  # 等待线程结束
+                TrainDetectionView.my_thread = None
+                return Response({"status": "success"})
+
+
+class SegmentView(views.APIView):
+    def post(self, request, endpoint_name, format=None):
+
+        algorithm_status = self.request.query_params.get("status", "production")
+        algorithm_version = self.request.query_params.get("version")
+
+        algs = MLAlgorithm.objects.filter(parent_endpoint__name = endpoint_name, status__status = algorithm_status, status__active=True)
+
+        if algorithm_version is not None:
+            algs = algs.filter(version = algorithm_version)
+        
+
+        if len(algs) == 0:
+            return Response(
+                {"status": "Error", "message": "ML algorithm is not available"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if len(algs) != 1 and algorithm_status != "ab_testing":
+            return Response(
+                {"status": "Error", "message": "ML algorithm selection is ambiguous. Please specify algorithm version."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        
+        alg_index = 0
+        if algorithm_status == "ab_testing":
+            alg_index = 0 if rand() < 0.5 else 1
+
+        # decode request json data
+        # param_data = request.data
+        # img_source = param_data['image_path']
+        # weight_path = param_data['weights_path']
+
+        param_data = request.data
+        img_source = ''
+        is_video = False
+        if 'is_video' in data:
+            img_source = param_data['video_path']
+            is_video = True
+        else:
+            img_source = param_data['image_path']
+
+        project_id = param_data['projectId']
+        task_id = param_data['taskId']
+        weight_path = param_data['weights_path']
+        algorithm_object = registry.endpoints[algs[alg_index].id]
+        
+        prediction = algorithm_object.compute_prediction(img_source,project_id,task_id,weight_path,is_video)
+        print(prediction)
+        prediction = (list(prediction))
+        response_data = []
+        for i in range(len(prediction)):
+           response_data.append({"result_txt_path":str(prediction[i][0]),"image_size":prediction[i][1],"result":prediction[i][2],"inference_time":prediction[i][3]})
+
+        return Response(response_data)
+
+class TrainSegmentationView(views.APIView):
+
+    def post(self, request, endpoint_name, format=None):
+
+        algorithm_status = self.request.query_params.get("status", "production")
+        algorithm_version = self.request.query_params.get("version")
+
+        algs = MLAlgorithm.objects.filter(parent_endpoint__name = endpoint_name, status__status = algorithm_status, status__active=True)
+
+        if algorithm_version is not None:
+            algs = algs.filter(version = algorithm_version)
+        
+
+        if len(algs) == 0:
+            return Response(
+                {"status": "Error", "message": "ML algorithm is not available"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if len(algs) != 1 and algorithm_status != "ab_testing":
+            return Response(
+                {"status": "Error", "message": "ML algorithm selection is ambiguous. Please specify algorithm version."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        alg_index = 0
+        if algorithm_status == "ab_testing":
+            alg_index = 0 if rand() < 0.5 else 1
+        # algorithhm
+        # decode request json data
+        param_data = request.data
+        # img_source = param_data['image_path']
+        # weight_path = param_data['weights_path']
+
+        # param = {'epochs':param_data['epochs'],'batch_size':param_data['batch_size'],'model':param_data['model'],
+        #          'imgsz':param_data['image_size']}
+        # algorithm_object = registry.endpoints[algs[alg_index].id]
+        # txt_file_path = '../storage/'+param_data['projectId'] + '/' + param_data['taskId'] + '/classes.txt'
+        # txt_to_yaml('../storage/'+param_data['projectId'],"images",txt_file_path)
+        # train_result = algorithm_object.train(param=param_data)
+        # #train_result=1
+        # print(train_result)
+        # return Response(train_result)
+        my_thread = TrainThread("YoloSegmentation", algs[alg_index].id, param_data)
+        my_thread.start()
+        #train_result=1
+        #print(train_result)
+        return Response({"status":"success"})
+
+
+predictor = None
+class SamAutomatedLabel(views.APIView):
+    def post(self, request, format=None):
+        global predictor
+        if predictor == None:
+            return Response({"status":"SAM model not loaded"})
+        else:
+            param_data = request.data
+            image_path = "../storage/" + param_data["project_id"] + "/images/" + param_data["image_name"]
+            label_save_path = "../storage/" + param_data["project_id"] + "/" + param_data["task_id"] + "/labels/" + param_data["image_name"][:-3]
+            label_save_path = label_save_path + "txt"
+            hq_token_only = False 
+            image = cv2.imread(image_path)
+            h,w = image.shape[0:2]
+            image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+            predictor.set_image(image)
+
+            # input_box = np.array(param_data["boxes"])
+            # input_point = np.array(param_data["points"])
+            input_label = None
+            if param_data["full_image"] == "True":
+                input_box = [[0,0,w-1,h-1]]
+            else:
+                if len(param_data["boxes"]) == 0:
+                    input_box = None
+                else:
+                    boxes_list = []
+                    boxes_json = param_data["boxes"]
+                    print(boxes_json)
+                    for i in range(len(boxes_json)):
+                        print(boxes_json[i])
+                        x = int(boxes_json[i]['shape']['x'])
+                        y = int(boxes_json[i]['shape']['y'])
+                        width = int(boxes_json[i]['shape']['width'])
+                        height = int(boxes_json[i]['shape']['height'])
+                        boxes_list.append([x,y,x+width,y+height])
+                    if(len(param_data["boxes"])>1):
+                        input_box = torch.tensor(boxes_list,device=predictor.device)
+                    else:
+                        input_box = np.array(boxes_list)
+                    
+
+                if len(param_data["points"]) == 0:
+                    input_point = None
+                else:
+                    points_list = []
+                    points_json = param_data["points"]
+                    for i in range(len(points_json)):
+                        points_list.append([int(points_json[i]['shape']['x']),int(points_json[i]['shape']['y'])])
+                    input_point = np.array(points_list)
+                    input_label = np.ones(input_point.shape[0])
+            #input_box = np.array([[500, 500, 2000, 1200]])
+            #input_point, input_label = None, None
+            batch_box = False if input_box is None else len(input_box)>1
+            if not batch_box: 
+                masks, scores, logits = predictor.predict(
+                    point_coords=input_point,
+                    point_labels=input_label,
+                    box = input_box,
+                    multimask_output=False,
+                    hq_token_only=hq_token_only, 
+                )
+                #show_res(masks,scores,input_point, input_label, input_box, 'example9', image)
+                convert_mask_to_yolo_format(masks,label_save_path)
+            else:
+                transformed_box = predictor.transform.apply_boxes_torch(input_box, image.shape[:2])
+                masks, scores, logits = predictor.predict_torch(
+                    point_coords=input_point,
+                    point_labels=input_label,
+                    boxes=transformed_box,
+                    multimask_output=False,
+                    hq_token_only=hq_token_only,
+                )
+                masks = masks.squeeze(1).cpu().numpy()
+                scores = scores.squeeze(1).cpu().numpy()
+                input_box = input_box.cpu().numpy()
+                convert_mask_to_yolo_format(masks,label_save_path)
+            
+            return Response({"status":"success"})
+
+class LoadSamModel(views.APIView):
+    def post(self, request, format=None):
+        global predictor
+        if predictor == None:
+            sam_checkpoint = "./algorithm_model/SAM/pretrained_checkpoint/sam_hq_vit_b.pth"
+            model_type = "vit_b"
+            sam = sam_model_registry[model_type](checkpoint=sam_checkpoint)
+            sam.to(device="cuda")
+            predictor = SamPredictor(sam)
+            return Response({"status":"success"})
+        else:
+            return Response({"status":"model already loaded"})

@@ -1,0 +1,52 @@
+# Python venv / env
+mydjango_project/venv/
+venv/
+.env
+.venv/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.mypy_cache/
+
+# IDE / OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
+
+# Logs / local db
+*.log
+django_console.log
+db.sqlite3
+
+# Installers & archives
+Miniconda3*.sh
+ML_backend.zip
+*.zip
+
+# Model weights — exclude by default, allow bundled bootstrap weights
+*.pt
+*.pth
+*.onnx
+*.engine
+!resources/
+!resources/**
+!resources/*.pt
+
+# SAM large assets (source kept; weights/demo excluded)
+algorithm_model/SAM/pretrained_checkpoint/
+algorithm_model/SAM/demo/
+algorithm_model/SAM/seginw/logs/
+algorithm_model/SAM/visual_demo/
+
+# Runtime training outputs (regenerated per run)
+runs/
+**/weights/
+**/trainning_data.csv
+
+# Backup files from hot patches on server
+*.bak
+*.bak.*
