@@ -12,7 +12,6 @@ import yaml
 ROOT_DIR = Path(__file__).resolve().parent.parent
 DEFAULT_CONFIG_CANDIDATES = (
     ROOT_DIR / "config.yaml",
-    ROOT_DIR / "config.example.yaml",
 )
 
 
@@ -36,6 +35,14 @@ class ModelConfig:
     iou: float = 0.45
     imgsz: int = 1280
     max_det: int = 300
+    engine: str = "yolo"  # yolo | locateanything | sam3
+    remote_key: str = ""
+
+
+@dataclass
+class AnnotationServiceConfig:
+    base_url: str = ""
+    timeout_sec: float = 180.0
 
 
 @dataclass
@@ -47,6 +54,7 @@ class Settings:
     default_model: str = ""
     models: List[ModelConfig] = field(default_factory=list)
     coord_space: str = "pixel"
+    annotation: AnnotationServiceConfig = field(default_factory=AnnotationServiceConfig)
 
 
 def resolve_config_path(explicit: Optional[str] = None) -> Path:
@@ -81,6 +89,8 @@ def parse_models(raw: Any) -> List[ModelConfig]:
         if not key or key in seen:
             continue
         task = str(item.get("task") or "detect").strip().lower()
+        engine = str(item.get("engine") or "yolo").strip().lower()
+        remote_key = str(item.get("remote_key") or key).strip()
         out.append(
             ModelConfig(
                 key=key,
@@ -92,6 +102,8 @@ def parse_models(raw: Any) -> List[ModelConfig]:
                 iou=float(item.get("iou", 0.45)),
                 imgsz=int(item.get("imgsz", 1280)),
                 max_det=int(item.get("max_det", 300)),
+                engine=engine,
+                remote_key=remote_key,
             )
         )
         seen.add(key)
@@ -120,4 +132,8 @@ def load_settings(config_path: Optional[str] = None) -> Settings:
         default_model=default_model,
         models=models,
         coord_space=str(_dig(data, "inference", "coord_space", default="pixel")).lower(),
+        annotation=AnnotationServiceConfig(
+            base_url=str(_dig(data, "annotation", "base_url", default="") or "").strip(),
+            timeout_sec=float(_dig(data, "annotation", "timeout_sec", default=180)),
+        ),
     )
