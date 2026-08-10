@@ -15,7 +15,7 @@ import numpy as np
 import torch
 from PIL import Image, ImageFilter
 
-logger = logging.getLogger("autolab-engine")
+logger = logging.getLogger(__name__)
 
 SAM3_COLORS = [
     {"stroke": "#16a34a", "rgba": (22, 163, 74, 92), "rgb": (22, 163, 74)},
@@ -165,6 +165,7 @@ class Sam3Worker:
         threshold: Optional[float] = None,
         points: Optional[List[dict]] = None,
         prompt_boxes: Optional[List[dict]] = None,
+        mask_format: str = "polygon_norm_pct",
     ) -> dict:
         prompt = prompt.strip()
         points = points or []
@@ -241,10 +242,29 @@ class Sam3Worker:
 
         mask_areas = [int(mask.sum()) for mask in masks]
         elapsed = time.perf_counter() - t0
+
+        from app.mask_format import segments_from_bool_masks
+
+        box_list = [[b["x1"], b["y1"], b["x2"], b["y2"]] for b in parsed_boxes]
+        label_list = [b.get("label") or label for b in parsed_boxes]
+        score_list = [b.get("score") for b in parsed_boxes]
+        segments = segments_from_bool_masks(
+            masks,
+            image_width=image.width,
+            image_height=image.height,
+            mask_format=mask_format,
+            labels=label_list,
+            scores=score_list,
+            boxes_xyxy=box_list,
+        )
+
         return {
             "answer": f"SAM3 prompt={prompt!r}, instances={len(parsed_boxes)}",
             "boxes": parsed_boxes,
             "points": [],
+            "segments": segments,
+            "annotation_type": "polygon",
+            "segmentation_mode": "instance",
             "sam3": {
                 "prompt": prompt,
                 "checkpoint": str(self.checkpoint),

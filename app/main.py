@@ -13,6 +13,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from PIL import Image
 
 from app.box_format import SUPPORTED_BOX_FORMATS, apply_box_format
+from app.mask_format import SUPPORTED_MASK_FORMATS
 from app.engines.base import BaseEngine
 from app.engines.yolo import YoloDetectEngine, YoloSegmentEngine
 from app.settings import ModelConfig, Settings, apply_runtime_env, load_settings
@@ -101,6 +102,16 @@ def _parse_image(raw: bytes, filename: str = "-") -> Image.Image:
         raise HTTPException(status_code=400, detail=f"无法解析图片 {filename}: {exc}") from exc
 
 
+def _normalize_mask_format(mask_format: Optional[str]) -> str:
+    fmt = (mask_format or "polygon_norm_pct").strip().lower()
+    if fmt not in SUPPORTED_MASK_FORMATS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"不支持的 mask_format: {mask_format!r}，可选 {list(SUPPORTED_MASK_FORMATS)}",
+        )
+    return fmt
+
+
 def _normalize_box_format(box_format: Optional[str]) -> str:
     fmt = (box_format or "xyxy").strip().lower()
     if fmt not in SUPPORTED_BOX_FORMATS:
@@ -125,6 +136,7 @@ def _run_predict(
     sam3_threshold: Optional[float] = None,
     sam3_points: Optional[str] = None,
     sam3_boxes: Optional[str] = None,
+    mask_format: str = "polygon_norm_pct",
 ) -> Dict[str, Any]:
     if is_vlm_engine(cfg):
         try:
@@ -138,6 +150,7 @@ def _run_predict(
                 sam3_points=sam3_points,
                 sam3_boxes=sam3_boxes,
                 conf=conf,
+                mask_format=mask_format,
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -154,17 +167,31 @@ def _run_predict(
         result["model_key"] = cfg.key
         result["model_name"] = cfg.name
         result["engine"] = cfg.engine
+        if "segments" not in result:
+            result["segments"] = []
         return result
 
     engine = ensure_model_engine(cfg.key)
-    result = engine.predict(
-        img,
-        conf=conf,
-        iou=iou,
-        imgsz=imgsz,
-        coord_space=SETTINGS.coord_space,
-    )
-    result["engine"] = "yolo"
+    is_segment = (cfg.task or "detect").lower() == "segment"
+    if is_segment:
+        result = engine.predict(
+            img,
+            conf=conf,
+            iou=iou,
+            imgsz=imgsz,
+            coord_space=SETTINGS.coord_space,
+            mask_format=mask_format,
+        )
+    else:
+        result = engine.predict(
+            img,
+            conf=conf,
+            iou=iou,
+            imgsz=imgsz,
+            coord_space=SETTINGS.coord_space,
+        )
+        result.setdefault("annotation_type", "box")
+        result.setdefault("segments", [])
     result["boxes"] = apply_box_format(
         result.get("boxes") or [],
         image_width=int(result.get("image_width") or img.width),
@@ -175,6 +202,7 @@ def _run_predict(
     result["box_format"] = box_format
     result["model_key"] = cfg.key
     result["model_name"] = cfg.name
+    result["engine"] = cfg.engine or "yolo"
     return result
 
 
@@ -241,6 +269,7 @@ def models() -> dict:
         "default_model": SETTINGS.default_model,
         "loaded": list(_engines.keys()),
         "box_formats": list(SUPPORTED_BOX_FORMATS),
+        "mask_formats": list(SUPPORTED_MASK_FORMATS),
         "models": [
             {
                 "key": m.key,
@@ -302,10 +331,12 @@ async def predict(
     sam3_threshold: Optional[float] = Form(None),
     sam3_points: Optional[str] = Form(None),
     sam3_boxes: Optional[str] = Form(None),
+    mask_format: Optional[str] = Form("polygon_norm_pct"),
 ) -> dict:
     """单图推理。YOLO、LocateAnything 或 SAM3（同进程加载）。"""
     t0 = time.perf_counter()
     fmt = _normalize_box_format(box_format)
+    mfmt = _normalize_mask_format(mask_format)
     raw = await image.read()
     filename = getattr(image, "filename", None) or "-"
     img = _parse_image(raw, filename)
@@ -333,11 +364,14 @@ async def predict(
             sam3_threshold=sam3_threshold,
             sam3_points=sam3_points,
             sam3_boxes=sam3_boxes,
+            mask_format=mfmt,
         )
     except NotImplementedError as exc:
         raise HTTPException(status_code=501, detail=str(exc)) from exc
     except HTTPException:
         raise
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     except FileNotFoundError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     except Exception as exc:
@@ -348,8 +382,63 @@ async def predict(
     timings = result.get("timings") or {}
     timings["total"] = total
     result["timings"] = timings
-    logger.debug("predict done %s | boxes=%s | %.2fs", cfg.key, len(result.get("boxes") or []), total)
+    logger.debug(
+        "predict done %s | boxes=%s | segments=%s | %.2fs",
+        cfg.key,
+        len(result.get("boxes") or []),
+        len(result.get("segments") or []),
+        total,
+    )
     return result
+
+
+@app.post("/api/predict/segment")
+async def predict_segment(
+    image: UploadFile = File(...),
+    model_key: Optional[str] = Form(None),
+    task: Optional[str] = Form(None),
+    categories: str = Form(""),
+    phrase: str = Form(""),
+    conf: Optional[float] = Form(None),
+    iou: Optional[float] = Form(None),
+    imgsz: Optional[int] = Form(None),
+    box_format: Optional[str] = Form("xyxy"),
+    mask_format: Optional[str] = Form("polygon_norm_pct"),
+    sam3_threshold: Optional[float] = Form(None),
+    sam3_points: Optional[str] = Form(None),
+    sam3_boxes: Optional[str] = Form(None),
+) -> dict:
+    """分割专用：YOLO instance segment 或 SAM3（文本/正负点/框提示）。
+
+    sam3_points JSON 示例: [{"x":120,"y":80,"label":1},{"x":200,"y":90,"label":0}]
+    label>0 正点，0 负点。可与 sam3_boxes、phrase/categories 组合。
+    """
+    cfg = get_model_config(model_key)
+    eng = (cfg.engine or "yolo").lower()
+    task_eff = (task or "").strip().lower()
+    if eng == "sam3" and not task_eff:
+        if sam3_points or sam3_boxes:
+            task_eff = "sam3_point"
+        else:
+            task_eff = "detect"
+    elif (cfg.task or "").lower() == "segment" and not task_eff:
+        task_eff = "segment"
+
+    return await predict(
+        image=image,
+        model_key=model_key,
+        conf=conf,
+        iou=iou,
+        imgsz=imgsz,
+        box_format=box_format,
+        task=task_eff or task,
+        categories=categories,
+        phrase=phrase,
+        sam3_threshold=sam3_threshold,
+        sam3_points=sam3_points,
+        sam3_boxes=sam3_boxes,
+        mask_format=mask_format,
+    )
 
 
 @app.post("/api/predict/batch")
@@ -361,6 +450,7 @@ async def predict_batch(
     iou: Optional[float] = Form(None),
     imgsz: Optional[int] = Form(None),
     box_format: Optional[str] = Form("xyxy"),
+    mask_format: Optional[str] = Form("polygon_norm_pct"),
 ) -> dict:
     """批量推理。同一 model_key；单次最多 BATCH_MAX_IMAGES 张。
 
@@ -369,6 +459,7 @@ async def predict_batch(
     """
     t0 = time.perf_counter()
     fmt = _normalize_box_format(box_format)
+    mfmt = _normalize_mask_format(mask_format)
     n = len(images)
     if n == 0:
         raise HTTPException(status_code=400, detail="images 不能为空")
@@ -383,7 +474,7 @@ async def predict_batch(
     if is_vlm_engine(cfg):
         raise HTTPException(
             status_code=400,
-            detail=f"模型 {cfg.key} 为 Locate/SAM3，请用单图 /api/predict（带 phrase/categories），暂不支持 batch",
+            detail=f"模型 {cfg.key} 为 Locate/SAM3，请用单图 /api/predict 或 /api/predict/segment",
         )
     logger.debug("batch %s | n=%s | fmt=%s", cfg.key, n, fmt)
 
@@ -409,14 +500,17 @@ async def predict_batch(
                 iou=iou,
                 imgsz=imgsz,
                 box_format=fmt,
+                mask_format=mfmt,
             )
             item.update(
                 {
                     "ok": True,
                     "task": one.get("task"),
+                    "annotation_type": one.get("annotation_type"),
                     "image_width": one.get("image_width"),
                     "image_height": one.get("image_height"),
                     "boxes": one.get("boxes") or [],
+                    "segments": one.get("segments") or [],
                     "masks": one.get("masks") or [],
                     "timings": one.get("timings") or {},
                 }

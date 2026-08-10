@@ -129,9 +129,120 @@ class YoloDetectEngine(BaseEngine):
 
 
 class YoloSegmentEngine(YoloDetectEngine):
-    """task=segment 占位：权重就绪后补齐 mask 编码。"""
+    """YOLO 实例分割（Ultralytics segment）。"""
 
-    def predict(self, image: Image.Image, **kwargs: Any) -> Dict[str, Any]:
-        raise NotImplementedError(
-            "segment 引擎尚未接入。请先提供分割权重路径与后端约定的 mask 格式（RLE/polygon）。"
+    def predict(
+        self,
+        image: Image.Image,
+        *,
+        conf: Optional[float] = None,
+        iou: Optional[float] = None,
+        imgsz: Optional[int] = None,
+        max_det: Optional[int] = None,
+        coord_space: str = "pixel",
+        mask_format: str = "polygon_norm_pct",
+        **kwargs: Any,
+    ) -> Dict[str, Any]:
+        from app.mask_format import SUPPORTED_MASK_FORMATS, segments_from_yolo_polys
+
+        if mask_format not in SUPPORTED_MASK_FORMATS:
+            raise ValueError(f"不支持的 mask_format: {mask_format!r}")
+
+        if self.model is None:
+            raise RuntimeError("模型未加载")
+        if image.mode != "RGB":
+            image = image.convert("RGB")
+
+        w, h = image.size
+        conf_v = float(self.config.conf if conf is None else conf)
+        iou_v = float(self.config.iou if iou is None else iou)
+        imgsz_v = int(self.config.imgsz if imgsz is None else imgsz)
+        max_det_v = int(self.config.max_det if max_det is None else max_det)
+
+        t0 = time.perf_counter()
+        results = self.model.predict(
+            source=image,
+            conf=conf_v,
+            iou=iou_v,
+            imgsz=imgsz_v,
+            max_det=max_det_v,
+            device=self.config.device,
+            verbose=False,
         )
+        infer_s = time.perf_counter() - t0
+
+        boxes: List[Dict[str, Any]] = []
+        segments: List[Dict[str, Any]] = []
+        if results:
+            r0 = results[0]
+            names = r0.names or {}
+            if r0.boxes is not None and len(r0.boxes):
+                xyxy = r0.boxes.xyxy.detach().cpu().tolist()
+                cls = r0.boxes.cls.detach().cpu().tolist()
+                confs = r0.boxes.conf.detach().cpu().tolist()
+                polys: List[Any] = []
+                if r0.masks is not None:
+                    polys = list(r0.masks.xy) if hasattr(r0.masks, "xy") else []
+
+                for idx, ((x1, y1, x2, y2), c, s) in enumerate(zip(xyxy, cls, confs)):
+                    cid = int(c)
+                    label = str(names.get(cid, cid))
+                    if coord_space == "norm1000":
+                        box = {
+                            "x1": x1 / w * 1000.0,
+                            "y1": y1 / h * 1000.0,
+                            "x2": x2 / w * 1000.0,
+                            "y2": y2 / h * 1000.0,
+                        }
+                    else:
+                        box = {"x1": float(x1), "y1": float(y1), "x2": float(x2), "y2": float(y2)}
+                    boxes.append(
+                        {
+                            "label": label,
+                            "class_id": cid,
+                            "score": float(s),
+                            **box,
+                        }
+                    )
+
+                if polys and len(polys) == len(xyxy):
+                    segments = segments_from_yolo_polys(
+                        polys,
+                        image_width=w,
+                        image_height=h,
+                        mask_format=mask_format,
+                        labels=[str(names.get(int(c), c)) for c in cls],
+                        class_ids=[int(c) for c in cls],
+                        scores=[float(s) for s in confs],
+                        boxes_xyxy=xyxy,
+                    )
+                elif r0.masks is not None and hasattr(r0.masks, "data"):
+                    from app.mask_format import segments_from_bool_masks
+
+                    md = r0.masks.data.detach().cpu().numpy()
+                    segments = segments_from_bool_masks(
+                        [md[i] > 0.5 for i in range(len(md))],
+                        image_width=w,
+                        image_height=h,
+                        mask_format=mask_format,
+                        labels=[str(names.get(int(c), c)) for c in cls],
+                        scores=[float(s) for s in confs],
+                        boxes_xyxy=xyxy,
+                        class_ids=[int(c) for c in cls],
+                    )
+
+        return {
+            "task": "segment",
+            "annotation_type": "polygon",
+            "segmentation_mode": "instance",
+            "mask_format": mask_format,
+            "image_width": w,
+            "image_height": h,
+            "boxes": boxes,
+            "segments": segments,
+            "masks": [],
+            "timings": {
+                "infer": infer_s,
+                "total": infer_s,
+            },
+        }

@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
 from PIL import Image
 
 from app.engines.base import BaseEngine
 from app.engines.locate_engine import _parse_categories
 from app.engines.sam3_worker import Sam3Worker, parse_boxes, parse_points
+from app.mask_format import SUPPORTED_MASK_FORMATS
 from app.settings import ModelConfig, Settings
 
 
@@ -38,26 +39,37 @@ class Sam3Engine(BaseEngine):
             threshold = kwargs.get("conf")
         points_json = kwargs.get("sam3_points")
         boxes_json = kwargs.get("sam3_boxes")
+        mask_format = str(kwargs.get("mask_format") or "polygon_norm_pct").strip().lower()
+        if mask_format not in SUPPORTED_MASK_FORMATS:
+            raise ValueError(f"不支持的 mask_format: {mask_format!r}，可选 {SUPPORTED_MASK_FORMATS}")
 
         points = parse_points(points_json)
         prompt_boxes = parse_boxes(boxes_json)
 
-        if task == "sam3_text":
+        prompt = ""
+        if task in ("sam3_point", "point", "interactive"):
+            if not points and not prompt_boxes:
+                raise ValueError("sam3_point 需要 sam3_points 和/或 sam3_boxes")
+            cats = _parse_categories(categories)
+            prompt = phrase.strip() or (cats[0] if cats else "")
+        elif task == "sam3_text":
             cats = _parse_categories(categories)
             prompt = phrase.strip() or (cats[0] if cats else "")
             if not prompt and not points and not prompt_boxes:
                 raise ValueError("SAM3 prompt 为空")
         elif task == "detect":
             cats = _parse_categories(categories)
-            if not cats:
-                raise ValueError("categories 为空")
-            prompt = cats[0]
-        elif task in {"ground_multi", "ground_single", "ground_text", "ground_gui", "point"}:
+            if not cats and not points and not prompt_boxes:
+                raise ValueError("categories 为空且未提供交互点/框")
+            prompt = cats[0] if cats else phrase.strip()
+        elif task in {"ground_multi", "ground_single", "ground_text", "ground_gui"}:
             prompt = phrase.strip()
             if not prompt:
                 raise ValueError("phrase 为空")
         else:
-            raise ValueError(f"SAM3 不支持 task: {task}")
+            raise ValueError(
+                f"SAM3 不支持 task: {task}；可选 detect, sam3_text, sam3_point, ground_*"
+            )
 
         if image.mode != "RGB":
             image = image.convert("RGB")
@@ -70,13 +82,19 @@ class Sam3Engine(BaseEngine):
             threshold=threshold,
             points=points,
             prompt_boxes=prompt_boxes,
+            mask_format=mask_format,
         )
+        segments = result.get("segments") or []
         return {
             "task": task,
+            "annotation_type": "polygon",
+            "segmentation_mode": "instance",
+            "mask_format": mask_format,
             "image_width": w,
             "image_height": h,
             "boxes": result.get("boxes") or [],
-            "points": result.get("points") or [],
+            "segments": segments,
+            "points": points,
             "masks": [],
             "answer": result.get("answer"),
             "sam3": result.get("sam3"),
