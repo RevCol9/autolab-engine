@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from PIL import Image
 
@@ -27,6 +27,28 @@ class Sam3Engine(BaseEngine):
             threshold=threshold,
         )
 
+    def _one(
+        self,
+        image: Image.Image,
+        prompt: str,
+        *,
+        threshold: Any,
+        points: List[dict],
+        prompt_boxes: List[dict],
+        mask_format: str,
+        label: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        assert self.worker is not None
+        return self.worker.predict_text(
+            image,
+            prompt,
+            label=label or prompt or "sam3",
+            threshold=threshold,
+            points=points,
+            prompt_boxes=prompt_boxes,
+            mask_format=mask_format,
+        )
+
     def predict(self, image: Image.Image, **kwargs: Any) -> Dict[str, Any]:
         if self.worker is None:
             raise RuntimeError("SAM3 未加载")
@@ -46,26 +68,34 @@ class Sam3Engine(BaseEngine):
         points = parse_points(points_json)
         prompt_boxes = parse_boxes(boxes_json)
 
-        prompt = ""
+        prompts: List[str] = []
         if task in ("sam3_point", "point", "interactive"):
             if not points and not prompt_boxes:
                 raise ValueError("sam3_point 需要 sam3_points 和/或 sam3_boxes")
             cats = _parse_categories(categories)
             prompt = phrase.strip() or (cats[0] if cats else "")
+            prompts = [prompt]
         elif task == "sam3_text":
             cats = _parse_categories(categories)
             prompt = phrase.strip() or (cats[0] if cats else "")
             if not prompt and not points and not prompt_boxes:
                 raise ValueError("SAM3 prompt 为空")
+            prompts = [prompt]
         elif task == "detect":
             cats = _parse_categories(categories)
-            if not cats and not points and not prompt_boxes:
+            if phrase.strip():
+                prompts = [phrase.strip()]
+            elif cats:
+                prompts = cats
+            elif points or prompt_boxes:
+                prompts = [""]
+            else:
                 raise ValueError("categories 为空且未提供交互点/框")
-            prompt = cats[0] if cats else phrase.strip()
         elif task in {"ground_multi", "ground_single", "ground_text", "ground_gui"}:
             prompt = phrase.strip()
             if not prompt:
                 raise ValueError("phrase 为空")
+            prompts = [prompt]
         else:
             raise ValueError(
                 f"SAM3 不支持 task: {task}；可选 detect, sam3_text, sam3_point, ground_*"
@@ -75,16 +105,34 @@ class Sam3Engine(BaseEngine):
             image = image.convert("RGB")
         w, h = image.size
 
-        result = self.worker.predict_text(
-            image,
-            prompt,
-            label=prompt or "sam3",
-            threshold=threshold,
-            points=points,
-            prompt_boxes=prompt_boxes,
-            mask_format=mask_format,
-        )
-        segments = result.get("segments") or []
+        merged_boxes: List[dict] = []
+        merged_segments: List[dict] = []
+        overlays: List[Any] = []
+        scores: List[float] = []
+        mask_areas: List[int] = []
+        timings_total = 0.0
+        last_sam3: Dict[str, Any] = {}
+
+        for prompt in prompts:
+            result = self._one(
+                image,
+                prompt,
+                threshold=threshold,
+                points=points,
+                prompt_boxes=prompt_boxes,
+                mask_format=mask_format,
+                label=prompt or "sam3",
+            )
+            merged_boxes.extend(result.get("boxes") or [])
+            merged_segments.extend(result.get("segments") or [])
+            sam3 = result.get("sam3") or {}
+            last_sam3 = sam3
+            if sam3.get("mask_overlay"):
+                overlays.append(sam3.get("mask_overlay"))
+            scores.extend(sam3.get("scores") or [])
+            mask_areas.extend(sam3.get("mask_areas") or [])
+            timings_total += float((result.get("timings") or {}).get("generate") or 0.0)
+
         return {
             "task": task,
             "annotation_type": "polygon",
@@ -92,11 +140,21 @@ class Sam3Engine(BaseEngine):
             "mask_format": mask_format,
             "image_width": w,
             "image_height": h,
-            "boxes": result.get("boxes") or [],
-            "segments": segments,
+            "boxes": merged_boxes,
+            "segments": merged_segments,
             "points": points,
             "masks": [],
-            "answer": result.get("answer"),
-            "sam3": result.get("sam3"),
-            "timings": result.get("timings") or {},
+            "answer": f"SAM3 prompts={prompts!r}, instances={len(merged_boxes)}",
+            "sam3": {
+                **last_sam3,
+                "prompt": prompts[0] if len(prompts) == 1 else prompts,
+                "prompts": prompts,
+                "mask_overlay": overlays[0] if len(overlays) == 1 else None,
+                "mask_overlays": overlays,
+                "mask_areas": mask_areas,
+                "scores": scores,
+                "points": points,
+                "boxes_prompt": prompt_boxes,
+            },
+            "timings": {"total_request": timings_total, "generate": timings_total},
         }

@@ -6,7 +6,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
@@ -25,7 +25,7 @@ class TrainDetectionBody(BaseModel):
     batch_size: Optional[int] = None
     image_size: Optional[int] = None
     model: Optional[str] = None
-    is_continue: Optional[bool] = None
+    is_continue: Optional[Any] = None
     last_train: Optional[str] = None
     device: Optional[str] = "0"
 
@@ -44,12 +44,12 @@ def train_status() -> Dict[str, Any]:
     return cur or {"status": "idle"}
 
 
-@app.post("/api/v1/yolo_detector/train/detection")
-def train_detection(body: TrainDetectionBody) -> Dict[str, Any]:
-    """兼容原 Django TrainDetectionView 路径与字段。"""
+def _train_detection(body: TrainDetectionBody) -> Dict[str, Any]:
     action = (body.action or "").strip().lower()
     if action == "stop":
-        return MANAGER.stop()
+        result = MANAGER.stop()
+        # 旧 Django 固定返回 {status: success}
+        return {"status": "success", **result}
 
     if action != "start":
         raise HTTPException(status_code=400, detail="action 须为 start 或 stop")
@@ -63,15 +63,33 @@ def train_detection(body: TrainDetectionBody) -> Dict[str, Any]:
     param.pop("action", None)
     device = str(param.pop("device", "0") or "0")
     if "model" in param and isinstance(param["model"], str):
-        param["model"] = param["model"].lower()
+        text = param["model"].strip()
+        if "/" not in text and "\\" not in text:
+            param["model"] = text.lower()
 
     try:
         job = MANAGER.start(param, sync=False, device=device)
-        # status 固定为 success，任务态放在 job 内，避免被 snapshot.status=running 覆盖
         return {"status": "success", "job": job}
     except RuntimeError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
-    except FileNotFoundError as exc:
+    except (FileNotFoundError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.post("/api/v1/yolo_detector/train/detection")
+def train_detection(body: TrainDetectionBody) -> Dict[str, Any]:
+    """兼容原 Django TrainDetectionView 路径与字段。"""
+    return _train_detection(body)
+
+
+@app.post("/api/v1/{endpoint_name}/train/detection")
+def train_detection_by_endpoint(endpoint_name: str, body: TrainDetectionBody) -> Dict[str, Any]:
+    """兼容原 /api/v1/{endpoint_name}/train/detection。"""
+    if endpoint_name != "yolo_detector":
+        raise HTTPException(
+            status_code=400,
+            detail=f"本模块仅支持 yolo_detector，收到 endpoint_name={endpoint_name}",
+        )
+    return _train_detection(body)

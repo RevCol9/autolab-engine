@@ -11,10 +11,14 @@ import csv
 import json
 import os
 import subprocess
+import sys
 import threading
 import time
 from datetime import datetime
 from pathlib import Path
+
+# 若 PYTHONPATH 仍指向旧 Django 内嵌 ultralytics 8.0，去掉以免覆盖 8.3+
+sys.path = [p for p in sys.path if "/algorithm_model/yolo" not in p.replace("\\", "/")]
 
 import psutil
 from ultralytics import YOLO

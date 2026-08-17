@@ -54,11 +54,11 @@ def prepare_data_yaml_for_job(param: Dict[str, Any]) -> Path:
     - projectId == algorithms：path=storage/algorithms/{taskId}，train={trainNum}/images
     - 其它：path=storage/{projectId}，train=images
     """
-    from training.paths import STORAGE_ROOT, classes_txt_path
+    from training.paths import STORAGE_ROOT, classes_txt_path, safe_id
 
-    project_id = str(param["projectId"])
-    task_id = str(param["taskId"])
-    train_num = str(param.get("trainNum") or "train1")
+    project_id = safe_id("projectId", param["projectId"])
+    task_id = safe_id("taskId", param["taskId"])
+    train_num = safe_id("trainNum", param.get("trainNum") or "train1")
     txt_path = classes_txt_path(project_id, task_id)
     if not txt_path.is_file():
         raise FileNotFoundError(f"classes.txt 不存在: {txt_path}")

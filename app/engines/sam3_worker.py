@@ -55,6 +55,15 @@ def _mask_overlay_data_url(image_size, masks) -> Optional[str]:
     return f"data:image/png;base64,{encoded}"
 
 
+def _require_float(item: dict, key: str, *, index: int, kind: str) -> float:
+    if key not in item or item[key] is None:
+        raise ValueError(f"SAM3 {kind}[{index}] 缺少字段 {key}")
+    try:
+        return float(item[key])
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"SAM3 {kind}[{index}].{key} 不是数字: {item[key]!r}") from exc
+
+
 def parse_points(raw: Optional[str]) -> List[dict]:
     if not raw:
         return []
@@ -66,12 +75,15 @@ def parse_points(raw: Optional[str]) -> List[dict]:
         raise ValueError("SAM3 points must be a JSON list.")
 
     points: List[dict] = []
-    for item in data:
+    for index, item in enumerate(data):
         if not isinstance(item, dict):
-            continue
-        x = float(item.get("x"))
-        y = float(item.get("y"))
-        label = int(item.get("label", 1))
+            raise ValueError(f"SAM3 points[{index}] 必须是对象")
+        x = _require_float(item, "x", index=index, kind="points")
+        y = _require_float(item, "y", index=index, kind="points")
+        try:
+            label = int(item.get("label", 1))
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"SAM3 points[{index}].label 非法: {item.get('label')!r}") from exc
         points.append({"x": x, "y": y, "label": 1 if label > 0 else 0})
     return points
 
@@ -87,14 +99,17 @@ def parse_boxes(raw: Optional[str]) -> List[dict]:
         raise ValueError("SAM3 boxes must be a JSON list.")
 
     boxes: List[dict] = []
-    for item in data:
+    for index, item in enumerate(data):
         if not isinstance(item, dict):
-            continue
-        x1 = float(item.get("x1"))
-        y1 = float(item.get("y1"))
-        x2 = float(item.get("x2"))
-        y2 = float(item.get("y2"))
-        label = int(item.get("label", 1))
+            raise ValueError(f"SAM3 boxes[{index}] 必须是对象")
+        x1 = _require_float(item, "x1", index=index, kind="boxes")
+        y1 = _require_float(item, "y1", index=index, kind="boxes")
+        x2 = _require_float(item, "x2", index=index, kind="boxes")
+        y2 = _require_float(item, "y2", index=index, kind="boxes")
+        try:
+            label = int(item.get("label", 1))
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"SAM3 boxes[{index}].label 非法: {item.get('label')!r}") from exc
         boxes.append(
             {
                 "x1": min(x1, x2),
@@ -118,14 +133,15 @@ class Sam3Worker:
     ):
         self.resource_dir = Path(resource_dir).expanduser().resolve()
         self.checkpoint = self.resource_dir / "sam3.pt"
-        self.device = "cuda" if str(device).startswith("cuda") else "cpu"
+        text = str(device or "cpu").strip()
+        self.device = text if text.startswith("cuda") else "cpu"
         self.threshold = float(threshold)
 
         if not self.resource_dir.is_dir():
             raise FileNotFoundError(f"SAM3 resource directory not found: {self.resource_dir}")
         if not self.checkpoint.is_file():
             raise FileNotFoundError(f"SAM3 checkpoint not found: {self.checkpoint}")
-        if self.device == "cuda" and not torch.cuda.is_available():
+        if str(self.device).startswith("cuda") and not torch.cuda.is_available():
             raise RuntimeError("SAM3 requested CUDA, but torch.cuda.is_available() is False.")
 
         sam3_repo = self.resource_dir.parent / "sam3"

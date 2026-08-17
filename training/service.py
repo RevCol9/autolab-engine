@@ -3,13 +3,17 @@
 from __future__ import annotations
 
 import logging
-import signal
 import threading
 import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, Optional
 
-from training.trainer import popen_detection_train, run_detection_train
+from training.trainer import (
+    collect_train_result,
+    kill_process_group,
+    popen_detection_train,
+    run_detection_train,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -37,20 +41,56 @@ class JobManager:
 
     def current(self) -> Optional[Dict[str, Any]]:
         with self._lock:
+            self._reap_if_exited()
             if self._job is None:
                 return None
             return self._snapshot(self._job)
 
+    def _reap_if_exited(self) -> None:
+        job = self._job
+        if job is None or job.status != "running" or job._proc is None:
+            return
+        code = job._proc.poll()
+        if code is None:
+            return
+        if job.finished_at is None:
+            job.finished_at = time.time()
+        if code == 0 and job.status == "running":
+            try:
+                from training.paths import train_save_dir
+
+                save_dir = train_save_dir(
+                    str(job.param["projectId"]),
+                    str(job.param["taskId"]),
+                    str(job.param["trainNum"]),
+                )
+                job.result = collect_train_result(save_dir)
+                job.status = "finished"
+            except Exception as exc:
+                job.status = "failed"
+                job.error = str(exc)
+        elif job.status == "running":
+            job.status = "failed"
+            job.error = job.error or f"exit_code={code}"
+
+    def _is_busy_locked(self) -> bool:
+        self._reap_if_exited()
+        job = self._job
+        if job is None:
+            return False
+        if job.status == "pending":
+            return True
+        if job.status == "running":
+            if job._proc is not None and job._proc.poll() is not None:
+                return False
+            return True
+        return False
+
     def start(self, param: Dict[str, Any], *, sync: bool = False, device: str = "0") -> Dict[str, Any]:
         with self._lock:
-            # 先清「标了 running 但进程未起来」的僵尸占用，再判断是否忙碌
-            if self._job and self._job.status == "running" and self._job._proc is None:
-                self._job.status = "failed"
-                self._job.error = self._job.error or "process never started"
-                self._job.finished_at = time.time()
-
-            if self._job and self._job.status == "running":
-                raise RuntimeError(f"已有训练任务在跑: {self._job.job_id} (pid={self._job.pid})")
+            if self._is_busy_locked():
+                job = self._job
+                raise RuntimeError(f"已有训练任务在跑: {job.job_id if job else '?'} (pid={job.pid if job else None})")
 
             self._counter += 1
             job_id = f"train-{self._counter}-{int(time.time())}"
@@ -60,36 +100,53 @@ class JobManager:
         if sync:
             try:
                 with self._lock:
+                    if job.status == "stopped":
+                        return self._snapshot(job)
                     job.status = "running"
                     job.started_at = time.time()
                 result = run_detection_train(param, device=device)
                 with self._lock:
+                    if job.status == "stopped":
+                        return self._snapshot(job)
                     job.status = "finished"
                     job.result = result
                     job.finished_at = time.time()
                 return self._snapshot(job)
             except Exception as exc:
                 with self._lock:
-                    job.status = "failed"
-                    job.error = str(exc)
-                    job.finished_at = time.time()
+                    if job.status != "stopped":
+                        job.status = "failed"
+                        job.error = str(exc)
+                        job.finished_at = time.time()
                 raise
 
         try:
-            # build_closed_loop_cmd / Popen 失败时不得保持 running
             proc = popen_detection_train(param, device=device)
         except Exception as exc:
             with self._lock:
-                job.status = "failed"
-                job.error = str(exc)
-                job.finished_at = time.time()
+                if job.status != "stopped":
+                    job.status = "failed"
+                    job.error = str(exc)
+                    job.finished_at = time.time()
             raise
 
+        kill_after_start = False
         with self._lock:
-            job.status = "running"
-            job.started_at = time.time()
-            job.pid = proc.pid
-            job._proc = proc
+            if job.status == "stopped":
+                kill_after_start = True
+            else:
+                job.status = "running"
+                job.started_at = time.time()
+                job.pid = proc.pid
+                job._proc = proc
+
+        if kill_after_start:
+            kill_process_group(proc)
+            with self._lock:
+                job.pid = proc.pid
+                job._proc = proc
+                job.finished_at = time.time()
+            return self._snapshot(job)
 
         def _wait() -> None:
             code = proc.wait()
@@ -100,17 +157,15 @@ class JobManager:
                 if code == 0:
                     from training.paths import train_save_dir
 
-                    save_dir = train_save_dir(
-                        str(param["projectId"]), str(param["taskId"]), str(param["trainNum"])
-                    )
-                    job.status = "finished"
-                    job.result = {
-                        "train_status": "finished",
-                        "weight_path": str(save_dir / "weights" / "best.pt"),
-                        "save_dir": str(save_dir),
-                        "report": str(save_dir / "report.json"),
-                        "csv": str(save_dir / "trainning_data.csv"),
-                    }
+                    try:
+                        save_dir = train_save_dir(
+                            str(param["projectId"]), str(param["taskId"]), str(param["trainNum"])
+                        )
+                        job.result = collect_train_result(save_dir)
+                        job.status = "finished"
+                    except Exception as exc:
+                        job.status = "failed"
+                        job.error = str(exc)
                 else:
                     job.status = "failed"
                     job.error = f"exit_code={code}"
@@ -122,37 +177,28 @@ class JobManager:
         with self._lock:
             job = self._job
             if job is None:
-                return {"status": "idle", "message": "无运行中的训练任务"}
+                return {"stopped": False, "message": "无运行中的训练任务", "job": None}
 
-            # prep 失败后若曾残留 running+_proc=None，允许 stop 清占用
-            if job.status == "running" and job._proc is None:
-                job.status = "failed"
-                job.error = job.error or "process never started"
+            if job.status == "pending":
+                job.status = "stopped"
                 job.finished_at = time.time()
-                return {
-                    "status": "stopped",
-                    "job_id": job.job_id,
-                    "pid": None,
-                    "message": "cleared stuck job without process",
-                }
+                return {"stopped": True, "job_id": job.job_id, "pid": job.pid, "job": self._snapshot(job)}
 
-            if job.status != "running" or job._proc is None:
-                return {"status": "idle", "message": "无运行中的训练任务"}
+            if job.status != "running":
+                return {"stopped": False, "message": "无运行中的训练任务", "job": self._snapshot(job)}
 
             proc = job._proc
             job.status = "stopped"
             job.finished_at = time.time()
             pid = job.pid
+            snapshot = self._snapshot(job)
 
-        try:
-            proc.send_signal(signal.SIGTERM)
+        if proc is not None:
             try:
-                proc.wait(timeout=15)
-            except Exception:
-                proc.kill()
-        except Exception as exc:
-            logger.warning("stop train failed: %s", exc)
-        return {"status": "stopped", "job_id": job.job_id, "pid": pid}
+                kill_process_group(proc)
+            except Exception as exc:
+                logger.warning("stop train failed: %s", exc)
+        return {"stopped": True, "job_id": job.job_id, "pid": pid, "job": snapshot}
 
     @staticmethod
     def _snapshot(job: TrainJob) -> Dict[str, Any]:

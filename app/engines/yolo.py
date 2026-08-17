@@ -43,8 +43,8 @@ class YoloDetectEngine(BaseEngine):
         if hasattr(self.model, "to") and device:
             try:
                 self.model.to(device)
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.warning("model.to(%s) failed for %s: %s", device, path, exc)
         logger.debug(
             "load  %s | task=%s | device=%s | %.2fs",
             path,
@@ -167,6 +167,7 @@ class YoloSegmentEngine(YoloDetectEngine):
             imgsz=imgsz_v,
             max_det=max_det_v,
             device=self.config.device,
+            retina_masks=True,
             verbose=False,
         )
         infer_s = time.perf_counter() - t0
@@ -205,15 +206,18 @@ class YoloSegmentEngine(YoloDetectEngine):
                         }
                     )
 
-                if polys and len(polys) == len(xyxy):
+                labels = [str(names.get(int(c), c)) for c in cls]
+                class_ids = [int(c) for c in cls]
+                score_list = [float(s) for s in confs]
+                if polys:
                     segments = segments_from_yolo_polys(
                         polys,
                         image_width=w,
                         image_height=h,
                         mask_format=mask_format,
-                        labels=[str(names.get(int(c), c)) for c in cls],
-                        class_ids=[int(c) for c in cls],
-                        scores=[float(s) for s in confs],
+                        labels=labels,
+                        class_ids=class_ids,
+                        scores=score_list,
                         boxes_xyxy=xyxy,
                     )
                 elif r0.masks is not None and hasattr(r0.masks, "data"):
@@ -225,10 +229,21 @@ class YoloSegmentEngine(YoloDetectEngine):
                         image_width=w,
                         image_height=h,
                         mask_format=mask_format,
-                        labels=[str(names.get(int(c), c)) for c in cls],
-                        scores=[float(s) for s in confs],
+                        labels=labels,
+                        scores=score_list,
                         boxes_xyxy=xyxy,
-                        class_ids=[int(c) for c in cls],
+                        class_ids=class_ids,
+                    )
+                else:
+                    segments = segments_from_yolo_polys(
+                        [],
+                        image_width=w,
+                        image_height=h,
+                        mask_format=mask_format,
+                        labels=labels,
+                        class_ids=class_ids,
+                        scores=score_list,
+                        boxes_xyxy=xyxy,
                     )
 
         return {

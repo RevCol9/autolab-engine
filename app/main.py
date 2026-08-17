@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+import threading
 import time
 from io import BytesIO
 from typing import Any, Dict, List, Optional
@@ -35,6 +37,7 @@ app.add_middleware(
 VLM_ENGINES = frozenset({"locateanything", "sam3"})
 _engines: Dict[str, BaseEngine] = {}
 _active_key: Optional[str] = None
+_gpu_lock = threading.RLock()
 
 
 def is_vlm_engine(cfg: ModelConfig) -> bool:
@@ -78,19 +81,30 @@ def build_engine(config: ModelConfig) -> BaseEngine:
 def ensure_model_engine(model_key: Optional[str] = None) -> BaseEngine:
     global _active_key
     cfg = get_model_config(model_key)
-    if cfg.key in _engines:
+    with _gpu_lock:
+        if cfg.key in _engines:
+            _active_key = cfg.key
+            return _engines[cfg.key]
+        if not cfg.path:
+            raise HTTPException(
+                status_code=503,
+                detail=f"模型 {cfg.key} 尚未配置路径（models[].path 为空）",
+            )
+        engine = build_engine(cfg)
+        engine.load()
+        _engines[cfg.key] = engine
         _active_key = cfg.key
-        return _engines[cfg.key]
-    if not cfg.path:
-        raise HTTPException(
-            status_code=503,
-            detail=f"模型 {cfg.key} 尚未配置路径（models[].path 为空）",
-        )
-    engine = build_engine(cfg)
-    engine.load()
-    _engines[cfg.key] = engine
-    _active_key = cfg.key
-    return engine
+        return engine
+
+
+def _run_predict_locked(
+    img: Image.Image,
+    cfg: ModelConfig,
+    **kwargs: Any,
+) -> Dict[str, Any]:
+    """串行化 GPU 推理，避免并发 load/predict 打满显存。"""
+    with _gpu_lock:
+        return _run_predict(img, cfg, **kwargs)
 
 
 def _parse_image(raw: bytes, filename: str = "-") -> Image.Image:
@@ -138,6 +152,40 @@ def _run_predict(
     sam3_boxes: Optional[str] = None,
     mask_format: str = "polygon_norm_pct",
 ) -> Dict[str, Any]:
+    with _gpu_lock:
+        return _run_predict_unlocked(
+            img,
+            cfg,
+            conf=conf,
+            iou=iou,
+            imgsz=imgsz,
+            box_format=box_format,
+            task=task,
+            categories=categories,
+            phrase=phrase,
+            sam3_threshold=sam3_threshold,
+            sam3_points=sam3_points,
+            sam3_boxes=sam3_boxes,
+            mask_format=mask_format,
+        )
+
+
+def _run_predict_unlocked(
+    img: Image.Image,
+    cfg: ModelConfig,
+    *,
+    conf: Optional[float],
+    iou: Optional[float],
+    imgsz: Optional[int],
+    box_format: str,
+    task: Optional[str] = None,
+    categories: str = "",
+    phrase: str = "",
+    sam3_threshold: Optional[float] = None,
+    sam3_points: Optional[str] = None,
+    sam3_boxes: Optional[str] = None,
+    mask_format: str = "polygon_norm_pct",
+) -> Dict[str, Any]:
     if is_vlm_engine(cfg):
         try:
             engine = ensure_model_engine(cfg.key)
@@ -164,6 +212,7 @@ def _run_predict(
             coord_space="pixel",
         )
         result["box_format"] = box_format
+        result["mask_format"] = mask_format
         result["model_key"] = cfg.key
         result["model_name"] = cfg.name
         result["engine"] = cfg.engine
@@ -200,6 +249,7 @@ def _run_predict(
         coord_space=SETTINGS.coord_space,
     )
     result["box_format"] = box_format
+    result["mask_format"] = mask_format if is_segment else result.get("mask_format")
     result["model_key"] = cfg.key
     result["model_name"] = cfg.name
     result["engine"] = cfg.engine or "yolo"
@@ -351,7 +401,8 @@ async def predict(
     )
 
     try:
-        result = _run_predict(
+        result = await asyncio.to_thread(
+            _run_predict_locked,
             img,
             cfg,
             conf=conf,
@@ -415,13 +466,23 @@ async def predict_segment(
     """
     cfg = get_model_config(model_key)
     eng = (cfg.engine or "yolo").lower()
+    task_cfg = (cfg.task or "").lower()
+    if eng not in {"sam3"} and task_cfg != "segment":
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"模型 {cfg.key} 不支持分割接口（engine={eng}, task={task_cfg}）；"
+                "请使用 task=segment 的 YOLO 或 engine=sam3"
+            ),
+        )
+
     task_eff = (task or "").strip().lower()
     if eng == "sam3" and not task_eff:
         if sam3_points or sam3_boxes:
             task_eff = "sam3_point"
         else:
             task_eff = "detect"
-    elif (cfg.task or "").lower() == "segment" and not task_eff:
+    elif task_cfg == "segment" and not task_eff:
         task_eff = "segment"
 
     return await predict(
@@ -493,7 +554,8 @@ async def predict_batch(
         try:
             raw = await up.read()
             img = _parse_image(raw, filename)
-            one = _run_predict(
+            one = await asyncio.to_thread(
+                _run_predict_locked,
                 img,
                 cfg,
                 conf=conf,
@@ -507,6 +569,8 @@ async def predict_batch(
                     "ok": True,
                     "task": one.get("task"),
                     "annotation_type": one.get("annotation_type"),
+                    "engine": one.get("engine") or cfg.engine or "yolo",
+                    "mask_format": one.get("mask_format") or mfmt,
                     "image_width": one.get("image_width"),
                     "image_height": one.get("image_height"),
                     "boxes": one.get("boxes") or [],
@@ -517,10 +581,30 @@ async def predict_batch(
             )
             ok_n += 1
         except HTTPException as exc:
-            item.update({"ok": False, "error": exc.detail, "boxes": [], "masks": []})
+            item.update(
+                {
+                    "ok": False,
+                    "error": exc.detail,
+                    "engine": cfg.engine or "yolo",
+                    "mask_format": mfmt,
+                    "boxes": [],
+                    "segments": [],
+                    "masks": [],
+                }
+            )
         except Exception as exc:
             logger.exception("batch item fail %s | %s | %s", cfg.key, image_id, exc)
-            item.update({"ok": False, "error": str(exc), "boxes": [], "masks": []})
+            item.update(
+                {
+                    "ok": False,
+                    "error": str(exc),
+                    "engine": cfg.engine or "yolo",
+                    "mask_format": mfmt,
+                    "boxes": [],
+                    "segments": [],
+                    "masks": [],
+                }
+            )
         results.append(item)
 
     total = time.perf_counter() - t0
@@ -529,7 +613,9 @@ async def predict_batch(
         "model_key": cfg.key,
         "model_name": cfg.name,
         "task": cfg.task,
+        "engine": cfg.engine or "yolo",
         "box_format": fmt,
+        "mask_format": mfmt,
         "count": n,
         "ok_count": ok_n,
         "results": results,
