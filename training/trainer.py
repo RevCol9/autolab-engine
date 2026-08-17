@@ -100,14 +100,18 @@ def popen_detection_train(
     device: str = "0",
     cwd: Optional[str] = None,
 ) -> subprocess.Popen:
-    """异步启动训练子进程，由 JobManager 管理。"""
+    """异步启动训练子进程，由 JobManager 管理。
+
+    不使用 stdout=PIPE：父进程若不 drain 会在缓冲写满后死锁子进程。
+    日志继承父进程（uvicorn/systemd journal），也可由调用方自行重定向。
+    """
     cmd = build_closed_loop_cmd(param, device=device)
     logger.info("closed_loop_train popen: %s", " ".join(cmd))
     return subprocess.Popen(
         cmd,
         cwd=cwd or "/tmp",
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
+        # 显式继承，避免 PIPE 未读导致挂死
+        stdout=None,
+        stderr=None,
         env={**os.environ, "PYTHONUNBUFFERED": "1"},
     )

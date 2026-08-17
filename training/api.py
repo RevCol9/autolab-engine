@@ -66,7 +66,9 @@ def train_detection(body: TrainDetectionBody) -> Dict[str, Any]:
         param["model"] = param["model"].lower()
 
     try:
-        return {"status": "success", **MANAGER.start(param, sync=False, device=device)}
+        job = MANAGER.start(param, sync=False, device=device)
+        # status 固定为 success，任务态放在 job 内，避免被 snapshot.status=running 覆盖
+        return {"status": "success", "job": job}
     except RuntimeError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except FileNotFoundError as exc:
