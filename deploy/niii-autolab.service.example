@@ -1,0 +1,32 @@
+# 复制到 /etc/systemd/system/niii-autolab.service 后：
+#   sudo systemctl daemon-reload
+#   sudo systemctl restart niii-autolab.service
+#
+# 推理服务需同时跑 YOLO + SAM3/Locate 时使用 models 环境；
+# 若仅 YOLO，可改回 yolo 环境的 python。
+
+[Unit]
+Description=NIII Autolab Inference Service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/project/kang/autolab-engine
+# YOLO + VLM/SAM3
+ExecStart=/root/.local/share/mamba/envs/models/bin/python /project/kang/autolab-engine/run.py
+# 仅 YOLO 时可改为：
+# ExecStart=/root/.local/share/mamba/envs/yolo/bin/python /project/kang/autolab-engine/run.py
+
+Restart=always
+RestartSec=3
+Environment=PYTHONUNBUFFERED=1
+# 与 config.yaml gpu.cuda_visible_devices 一致时可显式设置，例如：
+# Environment=CUDA_VISIBLE_DEVICES=0
+
+# 日志落盘（无终端彩色）；调试可 systemctl stop 后前台 python run.py
+StandardOutput=append:/project/kang/autolab-engine/autolab.log
+StandardError=append:/project/kang/autolab-engine/autolab.log
+
+[Install]
+WantedBy=multi-user.target
