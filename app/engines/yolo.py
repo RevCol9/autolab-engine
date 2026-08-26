@@ -53,6 +53,23 @@ class YoloDetectEngine(BaseEngine):
             time.perf_counter() - t0,
         )
 
+    def classes(self) -> List[str]:
+        if self.model is None:
+            return []
+        names = getattr(self.model, "names", None) or {}
+        if isinstance(names, (list, tuple)):
+            return [str(value) for value in names]
+        if not isinstance(names, dict):
+            return []
+        values = []
+        for key, value in names.items():
+            try:
+                order = (0, int(key))
+            except (TypeError, ValueError):
+                order = (1, str(key))
+            values.append((order, str(value)))
+        return [value for _, value in sorted(values, key=lambda item: item[0])]
+
     def predict(
         self,
         image: Image.Image,

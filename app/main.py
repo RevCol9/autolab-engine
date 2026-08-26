@@ -345,7 +345,7 @@ def load_model(model_key: str) -> dict:
     t0 = time.perf_counter()
     cfg = get_model_config(model_key)
     try:
-        ensure_model_engine(cfg.key)
+        engine = ensure_model_engine(cfg.key)
     except HTTPException:
         raise
     except FileNotFoundError as exc:
@@ -362,6 +362,7 @@ def load_model(model_key: str) -> dict:
         "task": cfg.task,
         "engine": cfg.engine,
         "device": cfg.device,
+        "classes": engine.classes(),
         "loaded": list(_engines.keys()),
         "timings": {"load": cost},
     }

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Any, Dict
+from typing import Any, Dict, List
 
 from PIL import Image
 
@@ -21,3 +21,6 @@ class BaseEngine(ABC):
     @abstractmethod
     def predict(self, image: Image.Image, **kwargs: Any) -> Dict[str, Any]:
         raise NotImplementedError
+
+    def classes(self) -> List[str]:
+        return []
