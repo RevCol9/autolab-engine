@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """Closed-loop training via ultralytics 8.3+ (supports YOLO11 baseline PT).
 
-从 niii_training_algorithm/algorithm_model/yolo/closed_loop_train.py 原样移植。
 由 training.trainer 通过 NIII_YOLO_PYTHON 子进程调用；产出 trainning_data.csv / report.json。
 """
 from __future__ import annotations
@@ -11,14 +10,10 @@ import csv
 import json
 import os
 import subprocess
-import sys
 import threading
 import time
 from datetime import datetime
 from pathlib import Path
-
-# 若 PYTHONPATH 仍指向旧 Django 内嵌 ultralytics 8.0，去掉以免覆盖 8.3+
-sys.path = [p for p in sys.path if "/algorithm_model/yolo" not in p.replace("\\", "/")]
 
 import psutil
 from ultralytics import YOLO

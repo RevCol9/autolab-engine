@@ -1,4 +1,4 @@
-"""训练任务管理：单任务 start/stop（替代原 Django TrainThread 强杀模型）。"""
+"""训练任务管理：单任务 start/stop。"""
 
 from __future__ import annotations
 
@@ -8,6 +8,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, Optional
 
+from training.paths import train_save_dir
 from training.trainer import (
     collect_train_result,
     kill_process_group,
@@ -32,7 +33,7 @@ class TrainJob:
 
 
 class JobManager:
-    """进程级单例：同一时刻只允许一个训练任务（与原平台全局线程语义接近）。"""
+    """同一时刻只允许一个训练任务。"""
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
@@ -53,25 +54,7 @@ class JobManager:
         code = job._proc.poll()
         if code is None:
             return
-        if job.finished_at is None:
-            job.finished_at = time.time()
-        if code == 0 and job.status == "running":
-            try:
-                from training.paths import train_save_dir
-
-                save_dir = train_save_dir(
-                    str(job.param["projectId"]),
-                    str(job.param["taskId"]),
-                    str(job.param["trainNum"]),
-                )
-                job.result = collect_train_result(save_dir)
-                job.status = "finished"
-            except Exception as exc:
-                job.status = "failed"
-                job.error = str(exc)
-        elif job.status == "running":
-            job.status = "failed"
-            job.error = job.error or f"exit_code={code}"
+        self._complete_job(job, code)
 
     def _is_busy_locked(self) -> bool:
         self._reap_if_exited()
@@ -98,27 +81,7 @@ class JobManager:
             self._job = job
 
         if sync:
-            try:
-                with self._lock:
-                    if job.status == "stopped":
-                        return self._snapshot(job)
-                    job.status = "running"
-                    job.started_at = time.time()
-                result = run_detection_train(param, device=device)
-                with self._lock:
-                    if job.status == "stopped":
-                        return self._snapshot(job)
-                    job.status = "finished"
-                    job.result = result
-                    job.finished_at = time.time()
-                return self._snapshot(job)
-            except Exception as exc:
-                with self._lock:
-                    if job.status != "stopped":
-                        job.status = "failed"
-                        job.error = str(exc)
-                        job.finished_at = time.time()
-                raise
+            return self._start_sync(job, param, device=device)
 
         try:
             proc = popen_detection_train(param, device=device)
@@ -148,29 +111,7 @@ class JobManager:
                 job.finished_at = time.time()
             return self._snapshot(job)
 
-        def _wait() -> None:
-            code = proc.wait()
-            with self._lock:
-                job.finished_at = time.time()
-                if job.status == "stopped":
-                    return
-                if code == 0:
-                    from training.paths import train_save_dir
-
-                    try:
-                        save_dir = train_save_dir(
-                            str(param["projectId"]), str(param["taskId"]), str(param["trainNum"])
-                        )
-                        job.result = collect_train_result(save_dir)
-                        job.status = "finished"
-                    except Exception as exc:
-                        job.status = "failed"
-                        job.error = str(exc)
-                else:
-                    job.status = "failed"
-                    job.error = f"exit_code={code}"
-
-        threading.Thread(target=_wait, daemon=True).start()
+        threading.Thread(target=self._wait_for_proc, args=(job, proc, param), daemon=True).start()
         return self._snapshot(job)
 
     def stop(self) -> Dict[str, Any]:
@@ -199,6 +140,57 @@ class JobManager:
             except Exception as exc:
                 logger.warning("stop train failed: %s", exc)
         return {"stopped": True, "job_id": job.job_id, "pid": pid, "job": snapshot}
+
+    def _start_sync(self, job: TrainJob, param: Dict[str, Any], *, device: str) -> Dict[str, Any]:
+        try:
+            with self._lock:
+                if job.status == "stopped":
+                    return self._snapshot(job)
+                job.status = "running"
+                job.started_at = time.time()
+            result = run_detection_train(param, device=device)
+            with self._lock:
+                if job.status == "stopped":
+                    return self._snapshot(job)
+                job.status = "finished"
+                job.result = result
+                job.finished_at = time.time()
+            return self._snapshot(job)
+        except Exception as exc:
+            with self._lock:
+                if job.status != "stopped":
+                    job.status = "failed"
+                    job.error = str(exc)
+                    job.finished_at = time.time()
+            raise
+
+    def _wait_for_proc(self, job: TrainJob, proc: Any, param: Dict[str, Any]) -> None:
+        code = proc.wait()
+        with self._lock:
+            self._complete_job(job, code, param=param)
+
+    def _complete_job(self, job: TrainJob, code: int, *, param: Optional[Dict[str, Any]] = None) -> None:
+        if job.finished_at is None:
+            job.finished_at = time.time()
+        if job.status == "stopped":
+            return
+        if code != 0:
+            job.status = "failed"
+            job.error = job.error or f"exit_code={code}"
+            return
+
+        payload = param or job.param
+        try:
+            save_dir = train_save_dir(
+                str(payload["projectId"]),
+                str(payload["taskId"]),
+                str(payload["trainNum"]),
+            )
+            job.result = collect_train_result(save_dir)
+            job.status = "finished"
+        except Exception as exc:
+            job.status = "failed"
+            job.error = str(exc)
 
     @staticmethod
     def _snapshot(job: TrainJob) -> Dict[str, Any]:

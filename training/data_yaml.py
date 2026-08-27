@@ -1,4 +1,4 @@
-"""classes.txt → YOLO data yaml（从原 ml/views.py txt_to_yaml 移植）。"""
+"""classes.txt → YOLO data yaml。"""
 
 from __future__ import annotations
 
@@ -6,6 +6,8 @@ from pathlib import Path
 from typing import Any, Dict
 
 import yaml
+
+from training.paths import STORAGE_ROOT, classes_txt_path, safe_id
 
 
 def classes_txt_to_yaml(
@@ -49,13 +51,11 @@ def classes_txt_to_yaml(
 
 
 def prepare_data_yaml_for_job(param: Dict[str, Any]) -> Path:
-    """按原 TrainThread 规则生成 classes.yaml。
+    """生成 Ultralytics data yaml。
 
     - projectId == algorithms：path=storage/algorithms/{taskId}，train={trainNum}/images
     - 其它：path=storage/{projectId}，train=images
     """
-    from training.paths import STORAGE_ROOT, classes_txt_path, safe_id
-
     project_id = safe_id("projectId", param["projectId"])
     task_id = safe_id("taskId", param["taskId"])
     train_num = safe_id("trainNum", param.get("trainNum") or "train1")

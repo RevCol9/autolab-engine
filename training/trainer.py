@@ -1,4 +1,4 @@
-"""检测闭环训练调度（从 yolo_detect.YoloDetector.train 移植，去掉 Django）。"""
+"""检测闭环训练调度。"""
 
 from __future__ import annotations
 
@@ -47,7 +47,7 @@ def resolve_model_path(param: Dict[str, Any]) -> str:
 
 
 def build_closed_loop_cmd(param: Dict[str, Any], *, device: str = "0") -> list[str]:
-    """组装 closed_loop_train.py 命令行（与原 yolo_detect.train 一致）。"""
+    """组装 closed_loop_train.py 命令行。"""
     project_id = str(param["projectId"])
     task_id = str(param["taskId"])
     train_num = str(param["trainNum"])

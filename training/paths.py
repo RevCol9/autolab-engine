@@ -1,4 +1,4 @@
-"""训练路径配置（从 niii_training_algorithm/niii_paths.py 移植）。
+"""训练路径配置。
 
 可通过环境变量覆盖；与 Java boot-vision 的 storage / 基线 PT 约定保持一致。
 """
@@ -14,14 +14,6 @@ _SAFE_ID = re.compile(r"^[A-Za-z0-9._-]+$")
 # 训练 storage 根，如 .../storage
 STORAGE_ROOT = Path(
     os.environ.get("NIII_TRAINING_STORAGE", "/niii_machine_version/AI_trainning_platform/storage")
-)
-
-# 本训练模块所在仓库根（默认 autolab-engine）
-PROJECT_ROOT = Path(
-    os.environ.get(
-        "NIII_ALGORITHM_ROOT",
-        str(Path(__file__).resolve().parent.parent),
-    )
 )
 
 # 闭环训练 subprocess 使用的 Python（mamba/venv，需装 ultralytics 8.3+）
@@ -73,13 +65,6 @@ def classes_txt_path(project_id: str, task_id: str) -> Path:
     pid = safe_id("projectId", project_id)
     tid = safe_id("taskId", task_id)
     path = STORAGE_ROOT / pid / tid / "classes.txt"
-    return _ensure_under(path, STORAGE_ROOT)
-
-
-def classes_yaml_path(project_id: str, task_id: str) -> Path:
-    pid = safe_id("projectId", project_id)
-    tid = safe_id("taskId", task_id)
-    path = STORAGE_ROOT / pid / tid / "classes.yaml"
     return _ensure_under(path, STORAGE_ROOT)
 
 

@@ -1,12 +1,8 @@
-"""训练 HTTP API（兼容原 POST .../train/detection 的 action=start|stop 字段）。
-
-可独立挂载到 FastAPI，或由后端直接调用 training.service.MANAGER。
-默认端口建议与推理 :21010 分离，例如 :21011。
-"""
+"""训练 HTTP API。"""
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
@@ -48,7 +44,6 @@ def _train_detection(body: TrainDetectionBody) -> Dict[str, Any]:
     action = (body.action or "").strip().lower()
     if action == "stop":
         result = MANAGER.stop()
-        # 旧 Django 固定返回 {status: success}
         return {"status": "success", **result}
 
     if action != "start":
@@ -62,10 +57,6 @@ def _train_detection(body: TrainDetectionBody) -> Dict[str, Any]:
     param: Dict[str, Any] = body.model_dump(exclude_none=True)
     param.pop("action", None)
     device = str(param.pop("device", "0") or "0")
-    if "model" in param and isinstance(param["model"], str):
-        text = param["model"].strip()
-        if "/" not in text and "\\" not in text:
-            param["model"] = text.lower()
 
     try:
         job = MANAGER.start(param, sync=False, device=device)
@@ -78,15 +69,8 @@ def _train_detection(body: TrainDetectionBody) -> Dict[str, Any]:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
-@app.post("/api/v1/yolo_detector/train/detection")
-def train_detection(body: TrainDetectionBody) -> Dict[str, Any]:
-    """兼容原 Django TrainDetectionView 路径与字段。"""
-    return _train_detection(body)
-
-
 @app.post("/api/v1/{endpoint_name}/train/detection")
-def train_detection_by_endpoint(endpoint_name: str, body: TrainDetectionBody) -> Dict[str, Any]:
-    """兼容原 /api/v1/{endpoint_name}/train/detection。"""
+def train_detection(endpoint_name: str, body: TrainDetectionBody) -> Dict[str, Any]:
     if endpoint_name != "yolo_detector":
         raise HTTPException(
             status_code=400,
