@@ -1,0 +1,23 @@
+"""推理引擎抽象。"""
+
+from __future__ import annotations
+
+from abc import ABC, abstractmethod
+from typing import Any, Dict
+
+from PIL import Image
+
+from app.settings import ModelConfig
+
+
+class BaseEngine(ABC):
+    def __init__(self, config: ModelConfig):
+        self.config = config
+
+    @abstractmethod
+    def load(self) -> None:
+        raise NotImplementedError
+
+    @abstractmethod
+    def predict(self, image: Image.Image, **kwargs: Any) -> Dict[str, Any]:
+        raise NotImplementedError
