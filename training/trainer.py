@@ -9,77 +9,20 @@ import subprocess
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-from training.data_yaml import prepare_data_yaml_for_job
-from training.paths import (
-    CLOSED_LOOP_TRAIN_SCRIPT,
-    YOLO_PYTHON,
-    baseline_pt_from_last_train,
-    train_save_dir,
-)
+from training.hparams import write_job_train_config
+from training.paths import CLOSED_LOOP_TRAIN_SCRIPT, YOLO_PYTHON, train_save_dir
 
 logger = logging.getLogger(__name__)
 
 
-def _truthy(value: Any) -> bool:
-    if value is True:
-        return True
-    if value is False or value is None:
-        return False
-    if isinstance(value, (int, float)):
-        return value != 0
-    text = str(value).strip().lower()
-    return text in {"1", "true", "yes", "y", "on"}
-
-
-def resolve_model_path(param: Dict[str, Any]) -> str:
-    """解析起始权重：续训用 last_train 基线，否则用 param.model。"""
-    if _truthy(param.get("is_continue")):
-        last_train = param.get("last_train")
-        if not last_train:
-            raise ValueError("is_continue=true 时必须提供 last_train")
-        return baseline_pt_from_last_train(str(last_train))
-    model = param.get("model") or "yolov8n.pt"
-    text = str(model).strip()
-    # 短名如 Yolov8n.pt → 小写；绝对/相对路径保持大小写
-    if "/" not in text and "\\" not in text:
-        return text.lower()
-    return text
-
-
 def build_closed_loop_cmd(param: Dict[str, Any], *, device: str = "0") -> list[str]:
-    """组装 closed_loop_train.py 命令行。"""
-    project_id = str(param["projectId"])
-    task_id = str(param["taskId"])
-    train_num = str(param["trainNum"])
-
-    data_yaml = prepare_data_yaml_for_job(param)
-    save_path = train_save_dir(project_id, task_id, train_num)
-    save_path.mkdir(parents=True, exist_ok=True)
-    train_parent = str(save_path.parent)
-    train_name = save_path.name
-    model_path = resolve_model_path(param)
-
+    """写入 train_config.yaml 并组装 closed_loop_train 子进程命令。"""
+    config_path = write_job_train_config(param, device=device)
     return [
         YOLO_PYTHON,
         str(CLOSED_LOOP_TRAIN_SCRIPT),
-        "--model",
-        model_path,
-        "--data",
-        str(data_yaml),
-        "--project",
-        train_parent,
-        "--name",
-        train_name,
-        "--epochs",
-        str(int(param["epochs"])),
-        "--batch",
-        str(int(param["batch_size"])),
-        "--imgsz",
-        str(int(param["image_size"])),
-        "--device",
-        str(device),
-        "--save-dir",
-        str(save_path),
+        "--config",
+        str(config_path),
     ]
 
 
@@ -88,10 +31,12 @@ def collect_train_result(save_dir: Path) -> Dict[str, Any]:
     weight = save_dir / "weights" / "best.pt"
     if not weight.is_file():
         raise RuntimeError(f"trained weights not found: {weight}")
+    config_path = save_dir / "train_config.yaml"
     return {
         "train_status": "finished",
         "weight_path": str(weight),
         "save_dir": str(save_dir),
+        "config": str(config_path) if config_path.is_file() else None,
         "report": str(save_dir / "report.json"),
         "csv": str(save_dir / "trainning_data.csv"),
     }
@@ -119,11 +64,7 @@ def popen_detection_train(
     device: str = "0",
     cwd: Optional[str] = None,
 ) -> subprocess.Popen:
-    """异步启动训练子进程，由 JobManager 管理。
-
-    不使用 stdout=PIPE：父进程若不 drain 会在缓冲写满后死锁子进程。
-    start_new_session=True：stop 时可杀整个进程组（含 ultralytics worker）。
-    """
+    """异步启动训练子进程，由 JobManager 管理。"""
     cmd = build_closed_loop_cmd(param, device=device)
     logger.info("closed_loop_train popen: %s", " ".join(cmd))
     return subprocess.Popen(

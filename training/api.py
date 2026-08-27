@@ -49,7 +49,7 @@ def _train_detection(body: TrainDetectionBody) -> Dict[str, Any]:
     if action != "start":
         raise HTTPException(status_code=400, detail="action 须为 start 或 stop")
 
-    required = ["projectId", "taskId", "trainNum", "epochs", "batch_size", "image_size"]
+    required = ["projectId", "taskId", "trainNum"]
     missing = [k for k in required if getattr(body, k, None) in (None, "")]
     if missing:
         raise HTTPException(status_code=400, detail=f"缺少字段: {missing}")

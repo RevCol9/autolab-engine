@@ -16,6 +16,7 @@ from datetime import datetime
 from pathlib import Path
 
 import psutil
+import yaml
 from ultralytics import YOLO
 
 SAMPLING_INTERVAL_SEC = 1.0
@@ -23,16 +24,21 @@ SAMPLING_INTERVAL_SEC = 1.0
 
 def parse_args():
     p = argparse.ArgumentParser()
-    p.add_argument("--model", required=True)
-    p.add_argument("--data", required=True)
-    p.add_argument("--project", required=True)
-    p.add_argument("--name", required=True)
-    p.add_argument("--epochs", type=int, default=50)
-    p.add_argument("--batch", type=int, default=4)
-    p.add_argument("--imgsz", type=int, default=640)
-    p.add_argument("--device", default="0")
-    p.add_argument("--save-dir", required=True, help="absolute path to train folder")
+    p.add_argument("--config", required=True, help="path to train_config.yaml")
     return p.parse_args()
+
+
+def load_job_config(path: str | Path) -> dict:
+    cfg_path = Path(path)
+    with cfg_path.open("r", encoding="utf-8") as f:
+        data = yaml.safe_load(f) or {}
+    if not isinstance(data, dict):
+        raise ValueError(f"train_config.yaml 格式错误: {cfg_path}")
+    required = ("model", "data", "save_dir")
+    missing = [key for key in required if not data.get(key)]
+    if missing:
+        raise ValueError(f"train_config.yaml 缺少字段: {missing}")
+    return data
 
 
 class ResourceSampler:
@@ -97,7 +103,10 @@ class ResourceSampler:
 
 def main():
     args = parse_args()
-    save_dir = Path(args.save_dir)
+    config = load_job_config(args.config)
+    save_dir = Path(str(config.pop("save_dir")))
+    model_path = str(config.pop("model"))
+    data_path = str(config.pop("data"))
     save_dir.mkdir(parents=True, exist_ok=True)
     csv_path = save_dir / "trainning_data.csv"
     process_start = time.time()
@@ -148,34 +157,38 @@ def main():
 
     report = {}
     try:
-        model = YOLO(args.model)
-        baseline_eval = evaluate_model(model_path=args.model, data=args.data, batch=args.batch,
-                                       imgsz=args.imgsz, device=args.device, project_dir=save_dir,
-                                       run_name="baseline_eval")
+        model = YOLO(model_path)
+        batch = int(config.get("batch", 4))
+        imgsz = int(config.get("imgsz", 640))
+        device = str(config.get("device", "0"))
+        baseline_eval = evaluate_model(
+            model_path=model_path,
+            data=data_path,
+            batch=batch,
+            imgsz=imgsz,
+            device=device,
+            project_dir=save_dir,
+            run_name="baseline_eval",
+        )
         train_start = time.time()
         state["epoch_start"] = train_start
         sampler = ResourceSampler().start()
         sampler_started = True
         model.add_callback("on_fit_epoch_end", on_fit_epoch_end)
-        model.train(
-            data=args.data,
-            epochs=args.epochs,
-            batch=args.batch,
-            imgsz=args.imgsz,
-            device=args.device,
-            project=args.project,
-            name=args.name,
-            exist_ok=True,
-            save=True,
-            amp=False,
-        )
+        model.train(data=data_path, **config)
         trained_pt = save_dir / "weights" / "best.pt"
         actual_resource = sampler.stop()
         sampler_started = False
         if trained_pt.is_file():
-            trained_eval = evaluate_model(model_path=str(trained_pt), data=args.data, batch=args.batch,
-                                          imgsz=args.imgsz, device=args.device, project_dir=save_dir,
-                                          run_name="trained_eval")
+            trained_eval = evaluate_model(
+                model_path=str(trained_pt),
+                data=data_path,
+                batch=batch,
+                imgsz=imgsz,
+                device=device,
+                project_dir=save_dir,
+                run_name="trained_eval",
+            )
         else:
             trained_eval = {"error": "trained weights not found", "modelPath": str(trained_pt)}
     finally:
@@ -184,7 +197,11 @@ def main():
             sampler_started = False
         finished_at = utc_now()
         report = build_report(
-            args=args,
+            config={
+                "model": model_path,
+                "data": data_path,
+                **config,
+            },
             save_dir=save_dir,
             csv_path=csv_path,
             started_at=utc_now_from_seconds(train_start),
@@ -233,20 +250,21 @@ def evaluate_model(model_path, data, batch, imgsz, device, project_dir, run_name
     return result
 
 
-def build_report(args, save_dir, csv_path, started_at, finished_at, actual_resource, baseline_eval, trained_eval,
+def build_report(config, save_dir, csv_path, started_at, finished_at, actual_resource, baseline_eval, trained_eval,
                  run_duration_sec):
     series = read_series(csv_path)
     report = {
         "schemaVersion": 1,
         "task": "closed_loop",
-        "model": args.model,
-        "data": args.data,
-        "project": args.project,
-        "name": args.name,
-        "epochs": args.epochs,
-        "batch": args.batch,
-        "imgsz": args.imgsz,
-        "device": args.device,
+        "model": config.get("model"),
+        "data": config.get("data"),
+        "project": config.get("project"),
+        "name": config.get("name"),
+        "epochs": config.get("epochs"),
+        "batch": config.get("batch"),
+        "imgsz": config.get("imgsz"),
+        "device": config.get("device"),
+        "trainConfig": str(save_dir / "train_config.yaml"),
         "startedAt": started_at,
         "finishedAt": finished_at,
         "durationSec": actual_resource.get("durationSec", run_duration_sec),
@@ -288,6 +306,7 @@ def compare_metrics(before, after):
 def collect_artifacts(save_dir):
     names = [
         "trainning_data.csv",
+        "train_config.yaml",
         "results.csv",
         "results.png",
         "confusion_matrix.png",
