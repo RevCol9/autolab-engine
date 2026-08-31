@@ -1,5 +1,4 @@
 # 闭环训练环境（建议 mamba env: yolo，与 NIII_YOLO_PYTHON 一致）
-# 从 niii_training_algorithm/requirements-yolo.txt 移植
 
 ultralytics>=8.3.0,<8.4
 PyYAML>=6.0

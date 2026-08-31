@@ -1,8 +1,10 @@
 # 新环境部署指南
 
-本文说明如何从 Git 部署 Django YOLO 训练服务，并与 Java 训练平台（boot-vision）联调。
+> **⚠️ 已废弃**：勿再部署 Django :8008。请使用 `training/` + `deploy/niii-autolab-train.service.example`，接口见 `docs/10-training-api.md`。
 
-## 架构概览
+本文档仅保留历史步骤供对照。
+
+## 架构概览（旧）
 
 ```
 boot-vision.jar (:8801)          Django (:8008)              mamba yolo env
