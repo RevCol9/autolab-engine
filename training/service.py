@@ -1,11 +1,6 @@
 """训练任务管理：单槽 JobManager + 跨进程 GPU 锁。
 
-流程：
-  api/train.py POST start → MANAGER.start
-    → 非阻塞获取 GpuDeviceLock（与推理争用同索引时 409）
-    → trainer.popen_detection_train 写 train_config.yaml 并 Popen 子进程
-    → 后台线程 wait，结束后 collect_train_result 校验 best.pt
-  POST stop → kill 进程组并释放 GPU 锁
+支持可插拔任务后端（training/backends/）：detection、segmentation。
 """
 
 from __future__ import annotations
@@ -20,7 +15,7 @@ from training.settings import resolve_training_device
 from shared.gpu_lock import GpuDeviceLock
 from training.paths import train_save_dir
 from training.progress import read_job_progress
-from training.trainer import collect_train_result, kill_process_group, popen_detection_train
+from training.trainer import collect_train_result, kill_process_group, popen_train
 
 logger = logging.getLogger(__name__)
 
@@ -103,7 +98,13 @@ class JobManager:
             return True
         return False
 
-    def start(self, param: Dict[str, Any], *, device: Optional[str] = None) -> Dict[str, Any]:
+    def start(
+        self,
+        param: Dict[str, Any],
+        *,
+        task: str = "detection",
+        device: Optional[str] = None,
+    ) -> Dict[str, Any]:
         with self._lock:
             if self._is_busy_locked():
                 job = self._job
@@ -115,7 +116,7 @@ class JobManager:
             job_id = f"train-{self._counter}-{int(time.time())}"
             job = TrainJob(
                 job_id=job_id,
-                param=dict(param),
+                param={**dict(param), "train_task": task},
                 status="pending",
                 device=resolve_training_device(device),
             )
@@ -131,7 +132,7 @@ class JobManager:
         job._gpu_lock = gpu_lock
 
         try:
-            proc = popen_detection_train(param, device=job.device)
+            proc = popen_train(param, task=task, device=job.device)
         except Exception as exc:
             self._release_gpu_lock(job)
             with self._lock:
@@ -229,6 +230,7 @@ class JobManager:
             "pid": job.pid,
             "device": job.device,
             "param": {
+                "train_task": job.param.get("train_task"),
                 "projectId": job.param.get("projectId"),
                 "taskId": job.param.get("taskId"),
                 "trainNum": job.param.get("trainNum"),

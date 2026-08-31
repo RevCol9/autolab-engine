@@ -1,7 +1,7 @@
 """训练 HTTP API（:21011，端口见 config/training/base.yaml）。
 
-POST /api/v1/yolo_detector/train/detection：action=start|stop，委托 training.service.JobManager。
-GET /api/train/status、/api/train/progress：任务快照与 CSV 进度。
+POST .../train/detection | .../train/segmentation：action=start|stop
+GET /api/train/status、/api/train/progress
 """
 
 from __future__ import annotations
@@ -9,11 +9,12 @@ from __future__ import annotations
 import logging
 import shutil
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Literal, Optional
 
 from fastapi import FastAPI, HTTPException, Query
 from pydantic import BaseModel, Field
 
+from training.registry import registered_tasks
 from training.settings import default_training_device, resolve_training_device
 from shared.gpu_lock import GpuDeviceLock, parse_device_index
 from training.paths import STORAGE_ROOT, YOLO_PYTHON
@@ -22,14 +23,16 @@ from shared.openapi_docs import openapi_description
 
 logger = logging.getLogger(__name__)
 
+TrainTask = Literal["detection", "segmentation"]
+
 app = FastAPI(
     title="autolab-training",
-    version="0.2.0",
-    description=openapi_description("train", summary="YOLO 检测闭环训练"),
+    version="0.3.0",
+    description=openapi_description("train", summary="YOLO 闭环训练（检测 / 分割）"),
 )
 
 
-class TrainDetectionBody(BaseModel):
+class TrainJobBody(BaseModel):
     action: str = Field(..., description="start | stop")
     projectId: Optional[str] = None
     taskId: Optional[str] = None
@@ -44,6 +47,10 @@ class TrainDetectionBody(BaseModel):
 
     class Config:
         extra = "allow"
+
+
+# 兼容旧 schema 名
+TrainDetectionBody = TrainJobBody
 
 
 def _probe_ultralytics() -> Dict[str, Any]:
@@ -90,6 +97,7 @@ def health() -> Dict[str, Any]:
     return {
         "status": "degraded" if degraded else "ok",
         "current": cur,
+        "train_tasks": registered_tasks(),
         "yolo_python": _probe_yolo_python(),
         "storage": storage,
         "ultralytics": ultralytics,
@@ -109,7 +117,6 @@ def train_progress(
     taskId: Optional[str] = Query(None),
     trainNum: Optional[str] = Query(None),
 ) -> Dict[str, Any]:
-    """返回当前任务或指定三元组的训练进度（解析 trainning_data.csv 末行）。"""
     cur = MANAGER.current()
     if projectId and taskId and trainNum:
         from training.progress import read_job_progress
@@ -135,7 +142,15 @@ def _positive_int_field(name: str, value: Any) -> int:
     return parsed
 
 
-def _train_detection(body: TrainDetectionBody) -> Dict[str, Any]:
+def _assert_yolo_detector(endpoint_name: str) -> None:
+    if endpoint_name != "yolo_detector":
+        raise HTTPException(
+            status_code=400,
+            detail=f"本模块仅支持 yolo_detector，收到 endpoint_name={endpoint_name}",
+        )
+
+
+def _run_train_job(body: TrainJobBody, *, task: TrainTask) -> Dict[str, Any]:
     action = (body.action or "").strip().lower()
     if action == "stop":
         result = MANAGER.stop()
@@ -159,22 +174,24 @@ def _train_detection(body: TrainDetectionBody) -> Dict[str, Any]:
     device = resolve_training_device(device_raw)
 
     try:
-        job = MANAGER.start(param, device=device)
+        job = MANAGER.start(param, task=task, device=device)
         return {"status": "success", "job": job}
     except RuntimeError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except (FileNotFoundError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
-        logger.exception("train start failed")
+        logger.exception("train start failed task=%s", task)
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
 @app.post("/api/v1/{endpoint_name}/train/detection")
-def train_detection(endpoint_name: str, body: TrainDetectionBody) -> Dict[str, Any]:
-    if endpoint_name != "yolo_detector":
-        raise HTTPException(
-            status_code=400,
-            detail=f"本模块仅支持 yolo_detector，收到 endpoint_name={endpoint_name}",
-        )
-    return _train_detection(body)
+def train_detection(endpoint_name: str, body: TrainJobBody) -> Dict[str, Any]:
+    _assert_yolo_detector(endpoint_name)
+    return _run_train_job(body, task="detection")
+
+
+@app.post("/api/v1/{endpoint_name}/train/segmentation")
+def train_segmentation(endpoint_name: str, body: TrainJobBody) -> Dict[str, Any]:
+    _assert_yolo_detector(endpoint_name)
+    return _run_train_job(body, task="segmentation")

@@ -1,7 +1,6 @@
-# 分割训练 Ultralytics 默认超参（后续实现 train/segmentation 时使用）。
-# 复制为 config/training/segmentation.yaml；与 base.yaml 合并加载。
+# 分割训练 Ultralytics 默认超参。复制为 config/training/segmentation.yaml；不入库。
 
-model: yolov8n-seg.pt
+model: yolo11n-seg.pt
 epochs: 100
 batch: 8
 imgsz: 640

@@ -1,8 +1,4 @@
-"""检测闭环训练调度：写 train_config.yaml 并 Popen closed_loop_train 子进程。
-
-子进程入口：training/closed_loop_train.py（由 NIII_YOLO_PYTHON 执行）
-产出目录：{STORAGE_ROOT}/.../train{N}/ 下的 train.log、trainning_data.csv、report.json、weights/best.pt
-"""
+"""闭环训练调度：写 train_config.yaml 并 Popen closed_loop_train 子进程。"""
 
 from __future__ import annotations
 
@@ -19,9 +15,13 @@ from training.paths import CLOSED_LOOP_TRAIN_SCRIPT, YOLO_PYTHON, train_save_dir
 logger = logging.getLogger(__name__)
 
 
-def build_closed_loop_cmd(param: Dict[str, Any], *, device: Optional[str] = None) -> list[str]:
-    """写入 train_config.yaml 并组装 closed_loop_train 子进程命令。"""
-    config_path = write_job_train_config(param, device=device)
+def build_closed_loop_cmd(
+    param: Dict[str, Any],
+    *,
+    task: str,
+    device: Optional[str] = None,
+) -> list[str]:
+    config_path = write_job_train_config(param, task=task, device=device)
     return [
         YOLO_PYTHON,
         str(CLOSED_LOOP_TRAIN_SCRIPT),
@@ -31,7 +31,6 @@ def build_closed_loop_cmd(param: Dict[str, Any], *, device: Optional[str] = None
 
 
 def collect_train_result(save_dir: Path) -> Dict[str, Any]:
-    """训练结束后校验产物；缺 best.pt 视为失败。"""
     weight = save_dir / "weights" / "best.pt"
     if not weight.is_file():
         raise RuntimeError(f"trained weights not found: {weight}")
@@ -47,19 +46,19 @@ def collect_train_result(save_dir: Path) -> Dict[str, Any]:
     }
 
 
-def popen_detection_train(
+def popen_train(
     param: Dict[str, Any],
     *,
+    task: str = "detection",
     device: Optional[str] = None,
     cwd: Optional[str] = None,
 ) -> subprocess.Popen:
-    """异步启动训练子进程；stdout/stderr 追加到 save_dir/train.log。"""
-    cmd = build_closed_loop_cmd(param, device=device)
+    cmd = build_closed_loop_cmd(param, task=task, device=device)
     save_dir = train_save_dir(str(param["projectId"]), str(param["taskId"]), str(param["trainNum"]))
     log_path = save_dir / "train.log"
     save_dir.mkdir(parents=True, exist_ok=True)
     log_fp = open(log_path, "a", encoding="utf-8")
-    logger.info("closed_loop_train popen: %s | log=%s", " ".join(cmd), log_path)
+    logger.info("closed_loop_train popen task=%s: %s | log=%s", task, " ".join(cmd), log_path)
     proc = subprocess.Popen(
         cmd,
         cwd=cwd or "/tmp",
@@ -68,12 +67,20 @@ def popen_detection_train(
         start_new_session=True,
         env={**os.environ, "PYTHONUNBUFFERED": "1"},
     )
-    log_fp.close()  # 子进程已继承 fd，父进程关闭副本避免泄漏
+    log_fp.close()
     return proc
 
 
+# 兼容旧调用名
+def popen_detection_train(
+    param: Dict[str, Any],
+    *,
+    device: Optional[str] = None,
+    cwd: Optional[str] = None,
+) -> subprocess.Popen:
+    return popen_train(param, task="detection", device=device, cwd=cwd)
+
 def kill_process_group(proc: subprocess.Popen, timeout: float = 15.0) -> None:
-    """终止子进程及其进程组。"""
     pid = proc.pid
     if pid is None:
         return

@@ -14,6 +14,10 @@ METRIC_ALIASES = {
     "recall": ["recall", "metrics/recall(B)", "metrics/recall", "mr", "R"],
     "map50": ["map50", "mAP50", "metrics/mAP50(B)", "metrics/mAP50", "metrics/map50"],
     "map5095": ["map5095", "mAP50-95", "metrics/mAP50-95(B)", "metrics/mAP50-95", "metrics/map5095"],
+    "precision_m": ["metrics/precision(M)", "precision(M)"],
+    "recall_m": ["metrics/recall(M)", "recall(M)"],
+    "map50_m": ["metrics/mAP50(M)", "mAP50(M)"],
+    "map5095_m": ["metrics/mAP50-95(M)", "mAP50-95(M)"],
     "fitness": ["fitness"],
 }
 
@@ -68,7 +72,7 @@ def build_report(
     series = read_series(csv_path)
     report = {
         "schemaVersion": 1,
-        "task": "closed_loop",
+        "task": config.get("train_task") or "closed_loop",
         "model": config.get("model"),
         "data": config.get("data"),
         "project": config.get("project"),

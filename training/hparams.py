@@ -1,10 +1,4 @@
-"""训练超参：config/training/*.yaml + API JSON → 任务级 train_config.yaml。
-
-合并顺序：
-  1. config/training/base.yaml + detection.yaml 中的 Ultralytics 默认项
-  2. 平台 POST JSON（字段名经 API_FIELD_ALIASES 映射）
-  3. 代码写入 model / data / save_dir / device（device 默认来自 config）
-"""
+"""训练超参：config/training/*.yaml + API JSON → 任务级 train_config.yaml。"""
 
 from __future__ import annotations
 
@@ -14,17 +8,16 @@ from typing import Any, Dict, Mapping, Optional
 
 import yaml
 
-from training.settings import resolve_training_device, training_ultralytics_defaults
+from training.backends import get_backend
 from training.data_yaml import prepare_data_yaml_for_job
 from training.paths import baseline_pt_from_last_train, train_save_dir
+from training.settings import resolve_training_device, training_ultralytics_defaults
 
-# Java/API 字段 → Ultralytics 字段
 API_FIELD_ALIASES: Dict[str, str] = {
     "batch_size": "batch",
     "image_size": "imgsz",
 }
 
-# 仅用于任务调度，不传入 model.train()
 JOB_META_KEYS = frozenset(
     {
         "action",
@@ -34,6 +27,7 @@ JOB_META_KEYS = frozenset(
         "is_continue",
         "last_train",
         "device",
+        "train_task",
     }
 )
 
@@ -49,33 +43,36 @@ def _truthy(value: Any) -> bool:
     return text in {"1", "true", "yes", "y", "on"}
 
 
-def resolve_model_path(param: Mapping[str, Any]) -> str:
-    """解析起始权重：续训用 last_train 基线，否则用 model。"""
+def resolve_model_path(
+    param: Mapping[str, Any],
+    *,
+    task: str,
+    defaults: Optional[Mapping[str, Any]] = None,
+) -> str:
     if _truthy(param.get("is_continue")):
         last_train = param.get("last_train")
         if not last_train:
             raise ValueError("is_continue=true 时必须提供 last_train")
         return baseline_pt_from_last_train(str(last_train))
-    model = param.get("model") or "yolov8n.pt"
+    backend = get_backend(task)
+    model = param.get("model") or (defaults or {}).get("model") or backend.default_model
     text = str(model).strip()
     if "/" not in text and "\\" not in text:
         return text.lower()
     return text
 
 
-def load_training_defaults() -> Dict[str, Any]:
-    """从 config/training/ 读取 Ultralytics 默认超参。"""
-    defaults = training_ultralytics_defaults()
+def load_training_defaults(task: str) -> Dict[str, Any]:
+    defaults = training_ultralytics_defaults(task)
     if not defaults:
         raise ValueError(
-            "config/training/detection.yaml 缺少 Ultralytics 超参；"
-            "请参考 config/training/detection.example.yaml"
+            f"config/training/{task}.yaml 缺少 Ultralytics 超参；"
+            f"请参考 config/training/{task}.example.yaml"
         )
     return deepcopy(defaults)
 
 
 def normalize_api_param(param: Mapping[str, Any]) -> Dict[str, Any]:
-    """将 HTTP/API 扁平 JSON 转为 Ultralytics 字段名。"""
     out: Dict[str, Any] = {}
     for key, value in param.items():
         if key in JOB_META_KEYS:
@@ -88,9 +85,12 @@ def normalize_api_param(param: Mapping[str, Any]) -> Dict[str, Any]:
 def build_job_train_config(
     param: Mapping[str, Any],
     *,
+    task: str,
     device: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """合并 config 默认、API 参数与任务路径，生成 train_config.yaml 内容。"""
+    backend = get_backend(task)
+    backend.validate_job(param)
+
     project_id = str(param["projectId"])
     task_id = str(param["taskId"])
     train_num = str(param["trainNum"])
@@ -99,11 +99,12 @@ def build_job_train_config(
     save_path = train_save_dir(project_id, task_id, train_num)
     save_path.mkdir(parents=True, exist_ok=True)
 
-    config: Dict[str, Any] = load_training_defaults()
+    config: Dict[str, Any] = load_training_defaults(task)
     config.update(normalize_api_param(param))
     config.update(
         {
-            "model": resolve_model_path(param),
+            "train_task": task,
+            "model": resolve_model_path(param, task=task, defaults=config),
             "data": str(data_yaml),
             "project": str(save_path.parent),
             "name": save_path.name,
@@ -122,14 +123,18 @@ def write_train_config(config: Mapping[str, Any], path: Path) -> Path:
     return path
 
 
-def write_job_train_config(param: Mapping[str, Any], *, device: Optional[str] = None) -> Path:
-    config = build_job_train_config(param, device=device)
+def write_job_train_config(
+    param: Mapping[str, Any],
+    *,
+    task: str,
+    device: Optional[str] = None,
+) -> Path:
+    config = build_job_train_config(param, task=task, device=device)
     save_dir = Path(str(config["save_dir"]))
     return write_train_config(config, save_dir / "train_config.yaml")
 
 
 def load_job_config(path: str | Path) -> Dict[str, Any]:
-    """读取 train_config.yaml（子进程 closed_loop_train 使用）。"""
     cfg_path = Path(path)
     if not cfg_path.is_file():
         raise FileNotFoundError(f"train_config.yaml 不存在: {cfg_path}")
@@ -137,7 +142,7 @@ def load_job_config(path: str | Path) -> Dict[str, Any]:
         data = yaml.safe_load(f) or {}
     if not isinstance(data, dict):
         raise ValueError(f"train_config.yaml 格式错误: {cfg_path}")
-    required = ("model", "data", "save_dir")
+    required = ("model", "data", "save_dir", "train_task")
     missing = [key for key in required if not data.get(key)]
     if missing:
         raise ValueError(f"train_config.yaml 缺少字段: {missing}")

@@ -20,7 +20,7 @@ config/
     ├── base.example.yaml
     ├── detection.yaml           # 检测训练 Ultralytics 默认超参
     ├── detection.example.yaml
-    ├── segmentation.yaml        # 分割训练（后续）
+    ├── segmentation.yaml        # 分割训练 Ultralytics 默认超参
     └── segmentation.example.yaml
 ```
 
@@ -70,6 +70,8 @@ POST /api/v1/.../train/detection action=start (api/train.py)
 ```
 
 进度：`GET /api/train/progress`；日志：`{save_dir}/train.log`。
+
+分割训练：`POST .../train/segmentation`，后端插件 `training/backends/segmentation.py`。
 
 ## 配置分工
 

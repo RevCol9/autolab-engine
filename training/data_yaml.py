@@ -50,6 +50,16 @@ def classes_txt_to_yaml(
     return out
 
 
+def labels_dir_for_job(param: Dict[str, Any]) -> Path:
+    """返回当前训练 run 的 labels 目录（与 prepare_data_yaml_for_job 布局一致）。"""
+    project_id = safe_id("projectId", param["projectId"])
+    task_id = safe_id("taskId", param["taskId"])
+    train_num = safe_id("trainNum", param.get("trainNum") or "train1")
+    if project_id == "algorithms":
+        return STORAGE_ROOT / "algorithms" / task_id / train_num / "labels"
+    return STORAGE_ROOT / project_id / "labels"
+
+
 def prepare_data_yaml_for_job(param: Dict[str, Any]) -> Path:
     """生成 Ultralytics data yaml。
 

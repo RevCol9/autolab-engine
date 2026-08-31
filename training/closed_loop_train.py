@@ -1,13 +1,5 @@
 #!/usr/bin/env python3
-"""Ultralytics 闭环训练子进程（由 trainer.popen_detection_train 启动）。
-
-算法步骤：
-  1. 读取 save_dir/train_config.yaml（hparams.write_job_train_config 生成）
-  2. baseline_eval：训练前在验证集上评估起始权重
-  3. model.train：每 epoch 回调写 trainning_data.csv（loss/mAP/资源占用）
-  4. trained_eval：对 weights/best.pt 再评估
-  5. 汇总 report.json（起止时间、指标对比、资源峰值）
-"""
+"""Ultralytics 闭环训练子进程（由 trainer.popen_train 启动）。"""
 from __future__ import annotations
 
 import argparse
@@ -16,13 +8,11 @@ from pathlib import Path
 
 from ultralytics import YOLO
 
+from training.backends import get_backend
 from training.hparams import load_job_config
 from training.reporting import (
     build_report,
     evaluate_model,
-    metric_lookup,
-    trainer_lr,
-    trainer_metric,
     utc_now,
     utc_now_from_seconds,
     write_csv,
@@ -40,6 +30,8 @@ def parse_args():
 def main():
     args = parse_args()
     config = load_job_config(args.config)
+    train_task = str(config.pop("train_task"))
+    backend = get_backend(train_task)
     save_dir = Path(str(config.pop("save_dir")))
     model_path = str(config.pop("model"))
     data_path = str(config.pop("data"))
@@ -53,6 +45,7 @@ def main():
     trained_eval = {}
     actual_resource = {}
     sampler_started = False
+    device = str(config.get("device", "0"))
 
     def on_fit_epoch_end(trainer):
         now = time.time()
@@ -64,31 +57,16 @@ def main():
         remaining = total_spend * (epochs - epoch) / epoch if epoch > 0 else 0
         metrics = trainer.metrics or {}
         resource = sampler.snapshot() if sampler else capture_resource_snapshot(device=device)
-        row = {
-            "epoch": epoch - 1,
-            "train/box_loss": trainer_metric(trainer, "train/box_loss"),
-            "train/cls_loss": trainer_metric(trainer, "train/cls_loss"),
-            "train/dfl_loss": trainer_metric(trainer, "train/dfl_loss"),
-            "metrics/precision(B)": metric_lookup(metrics, "precision"),
-            "metrics/recall(B)": metric_lookup(metrics, "recall"),
-            "metrics/mAP50(B)": metric_lookup(metrics, "map50"),
-            "metrics/mAP50-95(B)": metric_lookup(metrics, "map5095"),
-            "val/box_loss": metrics.get("val/box_loss", 0),
-            "val/cls_loss": metrics.get("val/cls_loss", 0),
-            "val/dfl_loss": metrics.get("val/dfl_loss", 0),
-            "lr/pg0": trainer_lr(trainer, 0),
-            "lr/pg1": trainer_lr(trainer, 1),
-            "lr/pg2": trainer_lr(trainer, 2),
-            "epoch_spend_time": round(epoch_spend, 4),
-            "total_spend_time": round(total_spend, 4),
-            "remaining_time": round(remaining, 4),
-            "resource_cpu": resource.get("cpu", 0),
-            "resource_mem": resource.get("mem", 0),
-            "resource_gpu": resource.get("gpu", 0),
-            "resource_gpu_mem_used_mb": resource.get("gpuMemUsedMb", 0),
-            "resource_gpu_mem_total_mb": resource.get("gpuMemTotalMb", 0),
-            "resource_disk": resource.get("disk", 0),
-        }
+        row = backend.build_epoch_row(
+            trainer,
+            metrics,
+            resource,
+            epoch_index=epoch - 1,
+            epochs=epochs,
+            epoch_spend=epoch_spend,
+            total_spend=total_spend,
+            remaining=remaining,
+        )
         write_csv(csv_path, row, state)
 
     try:
@@ -133,6 +111,7 @@ def main():
         finished_at = utc_now()
         report = build_report(
             config={
+                "train_task": train_task,
                 "model": model_path,
                 "data": data_path,
                 **config,
