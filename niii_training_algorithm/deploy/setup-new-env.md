@@ -142,23 +142,27 @@ cp /home/model/zhuqiang/yolo_detect/weights/best.pt \
 2. 打开「算法训练」→「同步基线 PT」
 3. Java 会从算法仓库复制到 storage 基线路径
 
-## 9. 启动 Django 训练服务
+## 9. 启动训练 HTTP 服务（:21011，替代 Django :8008）
 
 ```bash
-cd /niii_machine_version/AI_trainning_platform/boot-vison-python-master
-source /etc/niii/training-algorithm.env   # 若已配置
-source mydjango_project/venv/bin/activate
-nohup python manage.py runserver 0.0.0.0:8008 \
-  > /var/log/niii-django-train.log 2>&1 &
+sudo mkdir -p /etc/niii
+sudo cp /project/kang/autolab-engine/training/paths.env.example /etc/niii/training-algorithm.env
+# 编辑 NIII_TRAINING_STORAGE / NIII_YOLO_PYTHON 后：
+sudo cp /project/kang/autolab-engine/deploy/niii-autolab-train.service.example \
+  /etc/systemd/system/niii-autolab-train.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now niii-autolab-train.service
 ```
 
 验证：
 
 ```bash
-curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8008/
-curl -s -X POST http://127.0.0.1:8008/api/v1/yolo_detector/train/detection \
+curl -s http://127.0.0.1:21011/api/health
+curl -s -X POST http://127.0.0.1:21011/api/v1/yolo_detector/train/detection \
   -H 'Content-Type: application/json' -d '{"action":"stop"}'
 ```
+
+旧 Django :8008 可逐步下线；训练 API 路径与字段保持兼容。
 
 ## 10. 配置 Java 训练平台
 
@@ -171,7 +175,7 @@ jeecg:
 
 niii:
   closed-loop:
-    train-service-url: http://127.0.0.1:8008
+    train-service-url: http://127.0.0.1:21011
     algorithm-repository-path: /home/model/zhuqiang
 ```
 

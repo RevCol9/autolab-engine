@@ -40,6 +40,18 @@ def train_status() -> Dict[str, Any]:
     return cur or {"status": "idle"}
 
 
+def _positive_int_field(name: str, value: Any) -> int:
+    if value is None or value == "":
+        raise HTTPException(status_code=400, detail=f"缺少字段: {name}")
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=f"{name} 须为正整数") from exc
+    if parsed <= 0:
+        raise HTTPException(status_code=400, detail=f"{name} 须为正整数")
+    return parsed
+
+
 def _train_detection(body: TrainDetectionBody) -> Dict[str, Any]:
     action = (body.action or "").strip().lower()
     if action == "stop":
@@ -49,10 +61,14 @@ def _train_detection(body: TrainDetectionBody) -> Dict[str, Any]:
     if action != "start":
         raise HTTPException(status_code=400, detail="action 须为 start 或 stop")
 
-    required = ["projectId", "taskId", "trainNum"]
-    missing = [k for k in required if getattr(body, k, None) in (None, "")]
+    required_str = ["projectId", "taskId", "trainNum"]
+    missing = [k for k in required_str if getattr(body, k, None) in (None, "")]
     if missing:
         raise HTTPException(status_code=400, detail=f"缺少字段: {missing}")
+
+    body.epochs = _positive_int_field("epochs", body.epochs)
+    body.batch_size = _positive_int_field("batch_size", body.batch_size)
+    body.image_size = _positive_int_field("image_size", body.image_size)
 
     param: Dict[str, Any] = body.model_dump(exclude_none=True)
     param.pop("action", None)

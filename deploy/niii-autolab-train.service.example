@@ -1,0 +1,27 @@
+# 复制到 /etc/systemd/system/niii-autolab-train.service 后：
+#   sudo mkdir -p /etc/niii
+#   sudo cp training/paths.env.example /etc/niii/training-algorithm.env
+#   # 按本机修改 NIII_TRAINING_STORAGE 等
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now niii-autolab-train.service
+#
+# 训练与推理分离：本服务默认 :21011，推理见 niii-autolab.service (:21010)。
+
+[Unit]
+Description=NIII Autolab Training Service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/project/kang/autolab-engine
+EnvironmentFile=/etc/niii/training-algorithm.env
+ExecStart=/root/.local/share/mamba/envs/yolo/bin/python /project/kang/autolab-engine/training/run.py
+Restart=always
+RestartSec=3
+Environment=PYTHONUNBUFFERED=1
+StandardOutput=append:/project/kang/autolab-engine/autolab-train.log
+StandardError=append:/project/kang/autolab-engine/autolab-train.log
+
+[Install]
+WantedBy=multi-user.target
