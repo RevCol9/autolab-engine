@@ -1,0 +1,19 @@
+# 检测训练 Ultralytics 默认超参。复制为 config/training/detection.yaml；不入库。
+# 与 config/training/base.yaml 合并加载。
+
+epochs: 100
+batch: 16
+imgsz: 640
+exist_ok: true
+save: true
+amp: true
+verbose: false
+patience: 20
+workers: 4
+optimizer: SGD
+lr0: 0.01
+lrf: 0.01
+momentum: 0.937
+weight_decay: 0.0005
+warmup_epochs: 3.0
+close_mosaic: 10

@@ -7,8 +7,10 @@ docs/
 .env
 .env.*
 !.env.example
-annotation/config.yaml
-training/config.yaml
+config/annotation.yaml
+config/training/base.yaml
+config/training/detection.yaml
+config/training/segmentation.yaml
 
 # python
 __pycache__/

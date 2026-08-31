@@ -27,7 +27,7 @@ class YoloDetectEngine(BaseEngine):
         if not self.config.path or not path.is_file():
             raise FileNotFoundError(
                 f"模型权重不存在: {self.config.path!r}。"
-                "请在 config.yaml 的 models[].path 填写有效 .pt/.onnx 路径。"
+                "请在 config/annotation.yaml 的 models[].path 填写有效 .pt/.onnx 路径。"
             )
         try:
             from ultralytics import YOLO

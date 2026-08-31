@@ -22,7 +22,7 @@ Restart=always
 RestartSec=3
 Environment=PYTHONUNBUFFERED=1
 Environment=AUTOLAB_DOCS_PUBLIC_HOST=10.65.48.104
-# 与 annotation/config.yaml gpu.cuda_visible_devices 一致时可显式设置，例如：
+# 与 config/annotation.yaml gpu.cuda_visible_devices 一致时可显式设置，例如：
 # Environment=CUDA_VISIBLE_DEVICES=0
 
 # 日志落盘（无终端彩色）；调试可 systemctl stop 后前台 python run.py

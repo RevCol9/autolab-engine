@@ -1,7 +1,7 @@
 """引擎注册表：推理进程的模型缓存与 GPU 协调。
 
 职责：
-  - 解析 model_key → ModelConfig（annotation/config.yaml）
+  - 解析 model_key → ModelConfig（config/annotation.yaml）
   - 按 engine 类型构造 YOLO / Locate / SAM3 引擎并缓存在进程内
   - cross_gpu_session：与训练进程共享文件锁（shared/gpu_lock），避免同卡 OOM
   - _gpu_lock：本进程内多线程串行 load/predict（与文件锁是两层锁）
@@ -66,7 +66,7 @@ def cross_gpu_session(cfg: ModelConfig, *, timeout: float = GPU_INFER_TIMEOUT) -
 def get_model_config(model_key: Optional[str]) -> ModelConfig:
     key = (model_key or SETTINGS.default_model or "").strip()
     if not SETTINGS.models:
-        raise HTTPException(status_code=500, detail="annotation/config.yaml 未配置 models")
+        raise HTTPException(status_code=500, detail="config/annotation.yaml 未配置 models")
     if not key:
         return SETTINGS.models[0]
     for m in SETTINGS.models:

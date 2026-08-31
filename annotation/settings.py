@@ -1,4 +1,4 @@
-"""从 config.yaml 加载运行时配置。"""
+"""从 config/annotation.yaml 加载运行时配置。"""
 
 from __future__ import annotations
 
@@ -10,10 +10,11 @@ from typing import Any, Dict, List, Optional, Union
 
 import yaml
 
-ANNOTATION_DIR = Path(__file__).resolve().parent
+REPO_ROOT = Path(__file__).resolve().parent.parent
+CONFIG_ROOT = REPO_ROOT / "config"
 DEFAULT_CONFIG_CANDIDATES = (
-    ANNOTATION_DIR / "config.yaml",
-    ANNOTATION_DIR / "config.example.yaml",
+    CONFIG_ROOT / "annotation.yaml",
+    CONFIG_ROOT / "annotation.example.yaml",
 )
 
 
@@ -122,20 +123,17 @@ def resolve_config_path(explicit: Optional[str] = None) -> Path:
         if not path.is_file():
             raise FileNotFoundError(f"配置文件不存在: {path}")
         return path
-    env_path = (
-        os.getenv("ANNOTATION_CONFIG_PATH", "").strip()
-        or os.getenv("CONFIG_PATH", "").strip()
-    )
+    env_path = os.getenv("ANNOTATION_CONFIG_PATH", "").strip()
     if env_path:
         path = Path(env_path).expanduser().resolve()
         if not path.is_file():
-            raise FileNotFoundError(f"CONFIG_PATH 指向的文件不存在: {path}")
+            raise FileNotFoundError(f"ANNOTATION_CONFIG_PATH 指向的文件不存在: {path}")
         return path
     for candidate in DEFAULT_CONFIG_CANDIDATES:
         if candidate.is_file():
             return candidate
     raise FileNotFoundError(
-        f"未找到配置文件: {ANNOTATION_DIR / 'config.yaml'} 或 config.example.yaml"
+        f"未找到配置文件: {CONFIG_ROOT / 'annotation.yaml'} 或 annotation.example.yaml"
     )
 
 

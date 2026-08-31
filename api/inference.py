@@ -1,6 +1,6 @@
 """推理 HTTP API（:21010）。
 
-路由委托 annotation/predict_core 与 registry；配置来自 annotation/config.yaml。
+路由委托 annotation/predict_core 与 registry；配置来自 config/annotation.yaml。
 """
 
 from __future__ import annotations

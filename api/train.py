@@ -1,4 +1,4 @@
-"""训练 HTTP API（:21011，端口见 training/config.yaml）。
+"""训练 HTTP API（:21011，端口见 config/training/base.yaml）。
 
 POST /api/v1/yolo_detector/train/detection：action=start|stop，委托 training.service.JobManager。
 GET /api/train/status、/api/train/progress：任务快照与 CSV 进度。

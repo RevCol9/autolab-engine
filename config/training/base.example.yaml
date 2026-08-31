@@ -1,0 +1,13 @@
+# 训练服务共用配置。复制为 config/training/base.yaml；不入库。
+
+server:
+  host: "0.0.0.0"
+  port: 21011
+  log_level: info
+
+# 训练默认 GPU（gpu_lock + Ultralytics）；与推理分卡时改为 "1"
+device: "0"
+
+# 训练进程可见 GPU；双卡训推分离示例："0,1"（推理见 config/annotation.yaml）
+gpu:
+  cuda_visible_devices: "0"

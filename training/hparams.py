@@ -1,7 +1,7 @@
-"""训练超参：training/config.yaml + API JSON → 任务级 train_config.yaml。
+"""训练超参：config/training/*.yaml + API JSON → 任务级 train_config.yaml。
 
 合并顺序：
-  1. training/config.yaml 中的 Ultralytics 默认项
+  1. config/training/base.yaml + detection.yaml 中的 Ultralytics 默认项
   2. 平台 POST JSON（字段名经 API_FIELD_ALIASES 映射）
   3. 代码写入 model / data / save_dir / device（device 默认来自 config）
 """
@@ -64,11 +64,12 @@ def resolve_model_path(param: Mapping[str, Any]) -> str:
 
 
 def load_training_defaults() -> Dict[str, Any]:
-    """从 training/config.yaml 读取 Ultralytics 默认超参。"""
+    """从 config/training/ 读取 Ultralytics 默认超参。"""
     defaults = training_ultralytics_defaults()
     if not defaults:
         raise ValueError(
-            "training/config.yaml 缺少 Ultralytics 超参；请参考 training/config.example.yaml"
+            "config/training/detection.yaml 缺少 Ultralytics 超参；"
+            "请参考 config/training/detection.example.yaml"
         )
     return deepcopy(defaults)
 
