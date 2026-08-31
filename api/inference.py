@@ -37,13 +37,18 @@ from annotation.registry import (
     set_active_key,
 )
 from annotation.test_ui import test_page
+from shared.openapi_docs import openapi_description
 
 # 供测试与外部脚本复用
 from annotation.registry import ensure_model_engine, get_model_config  # noqa: F401
 
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="autolab-engine", version="0.3.1")
+app = FastAPI(
+    title="autolab-engine",
+    version="0.3.1",
+    description=openapi_description("infer", summary="推理 / 半自动标注"),
+)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],

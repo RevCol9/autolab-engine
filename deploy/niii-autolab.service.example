@@ -21,6 +21,7 @@ ExecStart=/root/.local/share/mamba/envs/models/bin/python /project/kang/autolab-
 Restart=always
 RestartSec=3
 Environment=PYTHONUNBUFFERED=1
+Environment=AUTOLAB_DOCS_PUBLIC_HOST=10.65.48.104
 # 与 annotation/config.yaml gpu.cuda_visible_devices 一致时可显式设置，例如：
 # Environment=CUDA_VISIBLE_DEVICES=0
 

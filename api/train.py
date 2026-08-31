@@ -18,10 +18,15 @@ from training.settings import default_training_device, resolve_training_device
 from shared.gpu_lock import GpuDeviceLock, parse_device_index
 from training.paths import STORAGE_ROOT, YOLO_PYTHON
 from training.service import MANAGER
+from shared.openapi_docs import openapi_description
 
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="autolab-training", version="0.2.0")
+app = FastAPI(
+    title="autolab-training",
+    version="0.2.0",
+    description=openapi_description("train", summary="YOLO 检测闭环训练"),
+)
 
 
 class TrainDetectionBody(BaseModel):

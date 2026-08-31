@@ -20,6 +20,7 @@ ExecStart=/root/.local/share/mamba/envs/yolo/bin/python /project/kang/autolab-en
 Restart=always
 RestartSec=3
 Environment=PYTHONUNBUFFERED=1
+Environment=AUTOLAB_DOCS_PUBLIC_HOST=10.65.48.104
 StandardOutput=append:/project/kang/autolab-engine/autolab-train.log
 StandardError=append:/project/kang/autolab-engine/autolab-train.log
 
