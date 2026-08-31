@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any, Dict, List, Optional
 
 from PIL import Image
@@ -18,6 +19,8 @@ from app.engines.box_postprocess import (
 )
 from app.engines.locate_worker import LocateAnythingWorker
 from app.settings import ModelConfig, Settings
+
+logger = logging.getLogger(__name__)
 
 
 class LocateEngine(BaseEngine):
@@ -162,6 +165,21 @@ class LocateEngine(BaseEngine):
             },
             "timings": result.get("timings") or {},
         }
+
+    def unload(self) -> None:
+        worker = self.worker
+        self.worker = None
+        if worker is not None:
+            worker.model = None
+            worker.processor = None
+            worker.tokenizer = None
+        try:
+            import torch
+
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except Exception as exc:
+            logger.debug("locate unload empty_cache: %s", exc)
 
 
 def _parse_categories(categories: str) -> List[str]:

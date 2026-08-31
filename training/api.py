@@ -2,14 +2,21 @@
 
 from __future__ import annotations
 
+import logging
+import shutil
+from pathlib import Path
 from typing import Any, Dict, Optional
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from pydantic import BaseModel, Field
 
+from app.gpu_lock import GpuDeviceLock, parse_device_index
+from training.paths import STORAGE_ROOT, YOLO_PYTHON
 from training.service import MANAGER
 
-app = FastAPI(title="autolab-training", version="0.1.0")
+logger = logging.getLogger(__name__)
+
+app = FastAPI(title="autolab-training", version="0.2.0")
 
 
 class TrainDetectionBody(BaseModel):
@@ -29,15 +36,81 @@ class TrainDetectionBody(BaseModel):
         extra = "allow"
 
 
+def _probe_ultralytics() -> Dict[str, Any]:
+    try:
+        import ultralytics
+
+        return {"ok": True, "version": getattr(ultralytics, "__version__", None)}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+
+
+def _probe_storage() -> Dict[str, Any]:
+    try:
+        root = STORAGE_ROOT.resolve()
+        root.mkdir(parents=True, exist_ok=True)
+        test = root / ".write_probe"
+        test.write_text("ok", encoding="utf-8")
+        test.unlink(missing_ok=True)
+        usage = shutil.disk_usage(root)
+        return {
+            "ok": True,
+            "path": str(root),
+            "free_gb": round(usage.free / (1024**3), 2),
+        }
+    except Exception as exc:
+        return {"ok": False, "path": str(STORAGE_ROOT), "error": str(exc)}
+
+
+def _probe_yolo_python() -> Dict[str, Any]:
+    py = Path(YOLO_PYTHON)
+    return {"path": str(py), "exists": py.is_file()}
+
+
 @app.get("/api/health")
 def health() -> Dict[str, Any]:
-    return {"status": "ok", "current": MANAGER.current()}
+    cur = MANAGER.current()
+    device = "0"
+    if cur and cur.get("device"):
+        device = str(cur["device"])
+    gpu_busy = GpuDeviceLock(device).is_held_by_other()
+    storage = _probe_storage()
+    ultralytics = _probe_ultralytics()
+    degraded = not storage.get("ok") or not ultralytics.get("ok")
+    return {
+        "status": "degraded" if degraded else "ok",
+        "current": cur,
+        "yolo_python": _probe_yolo_python(),
+        "storage": storage,
+        "ultralytics": ultralytics,
+        "gpu": {"device": parse_device_index(device), "busy": gpu_busy},
+    }
 
 
 @app.get("/api/train/status")
 def train_status() -> Dict[str, Any]:
     cur = MANAGER.current()
     return cur or {"status": "idle"}
+
+
+@app.get("/api/train/progress")
+def train_progress(
+    projectId: Optional[str] = Query(None),
+    taskId: Optional[str] = Query(None),
+    trainNum: Optional[str] = Query(None),
+) -> Dict[str, Any]:
+    """返回当前任务或指定三元组的训练进度（解析 trainning_data.csv 末行）。"""
+    cur = MANAGER.current()
+    if projectId and taskId and trainNum:
+        from training.progress import read_job_progress
+
+        return {
+            "status": "ok",
+            "progress": read_job_progress(projectId, taskId, trainNum),
+        }
+    if cur is None:
+        return {"status": "idle"}
+    return {"status": "ok", **MANAGER.progress()}
 
 
 def _positive_int_field(name: str, value: Any) -> int:
@@ -82,6 +155,7 @@ def _train_detection(body: TrainDetectionBody) -> Dict[str, Any]:
     except (FileNotFoundError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
+        logger.exception("train start failed")
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 

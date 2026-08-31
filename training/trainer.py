@@ -39,6 +39,7 @@ def collect_train_result(save_dir: Path) -> Dict[str, Any]:
         "config": str(config_path) if config_path.is_file() else None,
         "report": str(save_dir / "report.json"),
         "csv": str(save_dir / "trainning_data.csv"),
+        "log": str(save_dir / "train.log"),
     }
 
 
@@ -51,8 +52,18 @@ def run_detection_train(
     """同步执行闭环检测训练（阻塞到结束）。"""
     cmd = build_closed_loop_cmd(param, device=device)
     save_dir = train_save_dir(str(param["projectId"]), str(param["taskId"]), str(param["trainNum"]))
-    logger.info("closed_loop_train cmd: %s", " ".join(cmd))
-    proc = subprocess.run(cmd, check=False, cwd=cwd or "/tmp", start_new_session=True)
+    log_path = save_dir / "train.log"
+    save_dir.mkdir(parents=True, exist_ok=True)
+    logger.info("closed_loop_train cmd: %s | log=%s", " ".join(cmd), log_path)
+    with open(log_path, "a", encoding="utf-8") as log_fp:
+        proc = subprocess.run(
+            cmd,
+            check=False,
+            cwd=cwd or "/tmp",
+            start_new_session=True,
+            stdout=log_fp,
+            stderr=subprocess.STDOUT,
+        )
     if proc.returncode != 0:
         raise RuntimeError(f"closed_loop_train failed, exit={proc.returncode}")
     return collect_train_result(save_dir)
@@ -64,17 +75,23 @@ def popen_detection_train(
     device: str = "0",
     cwd: Optional[str] = None,
 ) -> subprocess.Popen:
-    """异步启动训练子进程，由 JobManager 管理。"""
+    """异步启动训练子进程；stdout/stderr 追加到 save_dir/train.log。"""
     cmd = build_closed_loop_cmd(param, device=device)
-    logger.info("closed_loop_train popen: %s", " ".join(cmd))
-    return subprocess.Popen(
+    save_dir = train_save_dir(str(param["projectId"]), str(param["taskId"]), str(param["trainNum"]))
+    log_path = save_dir / "train.log"
+    save_dir.mkdir(parents=True, exist_ok=True)
+    log_fp = open(log_path, "a", encoding="utf-8")
+    logger.info("closed_loop_train popen: %s | log=%s", " ".join(cmd), log_path)
+    proc = subprocess.Popen(
         cmd,
         cwd=cwd or "/tmp",
-        stdout=None,
-        stderr=None,
+        stdout=log_fp,
+        stderr=subprocess.STDOUT,
         start_new_session=True,
         env={**os.environ, "PYTHONUNBUFFERED": "1"},
     )
+    log_fp.close()  # 子进程已继承 fd，父进程关闭副本避免泄漏
+    return proc
 
 
 def kill_process_group(proc: subprocess.Popen, timeout: float = 15.0) -> None:

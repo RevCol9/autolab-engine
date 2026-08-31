@@ -42,11 +42,12 @@ def load_job_config(path: str | Path) -> dict:
 
 
 class ResourceSampler:
-    def __init__(self, interval=SAMPLING_INTERVAL_SEC):
+    def __init__(self, interval=SAMPLING_INTERVAL_SEC, device: str | int = 0):
         self.interval = interval
+        self.device = device
         self._stop = threading.Event()
         self._thread = None
-        self._latest = capture_resource_snapshot()
+        self._latest = capture_resource_snapshot(self.device)
         self.samples = [self._latest]
 
     def start(self):
@@ -57,12 +58,12 @@ class ResourceSampler:
 
     def _run(self):
         while not self._stop.wait(self.interval):
-            self._latest = capture_resource_snapshot()
+            self._latest = capture_resource_snapshot(self.device)
             self.samples.append(self._latest)
 
     def snapshot(self):
         if not self._latest:
-            self._latest = capture_resource_snapshot()
+            self._latest = capture_resource_snapshot(self.device)
             self.samples.append(self._latest)
         return dict(self._latest)
 
@@ -70,7 +71,7 @@ class ResourceSampler:
         self._stop.set()
         if self._thread and self._thread.is_alive():
             self._thread.join(timeout=max(1.0, self.interval * 2))
-        final_sample = capture_resource_snapshot()
+        final_sample = capture_resource_snapshot(self.device)
         self._latest = final_sample
         self.samples.append(final_sample)
         return self.summary()
@@ -127,7 +128,7 @@ def main():
         total_spend = now - train_start
         remaining = total_spend * (epochs - epoch) / epoch if epoch > 0 else 0
         metrics = trainer.metrics or {}
-        resource = sampler.snapshot() if sampler else capture_resource_snapshot()
+        resource = sampler.snapshot() if sampler else capture_resource_snapshot(device=device)
         row = {
             "epoch": epoch - 1,
             "train/box_loss": _metric(trainer, "train/box_loss"),
@@ -172,7 +173,7 @@ def main():
         )
         train_start = time.time()
         state["epoch_start"] = train_start
-        sampler = ResourceSampler().start()
+        sampler = ResourceSampler(device=device).start()
         sampler_started = True
         model.add_callback("on_fit_epoch_end", on_fit_epoch_end)
         model.train(data=data_path, **config)
@@ -390,10 +391,10 @@ def read_series(csv_path):
     return series
 
 
-def capture_resource_snapshot():
+def capture_resource_snapshot(device: str | int = 0):
     mem = psutil.virtual_memory()
     disk = psutil.disk_usage(os.path.abspath(os.sep))
-    gpu = capture_gpu_snapshot()
+    gpu = capture_gpu_snapshot(device)
     now = time.time()
     return {
         "timestamp": now,
@@ -411,12 +412,14 @@ def capture_resource_snapshot():
     }
 
 
-def capture_gpu_snapshot():
+def capture_gpu_snapshot(device: str | int = 0):
+    device_index = int(str(device).strip() or "0")
     result = {
         "gpu": 0,
         "gpuName": "N/A",
         "gpuMemUsedMb": 0,
         "gpuMemTotalMb": 0,
+        "device_index": device_index,
     }
     try:
         proc = subprocess.run(
@@ -431,7 +434,8 @@ def capture_gpu_snapshot():
             timeout=3,
         )
         stdout = (proc.stdout or "").strip()
-        line = stdout.splitlines()[0] if stdout else ""
+        lines = [ln for ln in stdout.splitlines() if ln.strip()]
+        line = lines[device_index] if device_index < len(lines) else (lines[0] if lines else "")
         if line:
             parts = [part.strip() for part in line.split(",")]
             if len(parts) >= 4:

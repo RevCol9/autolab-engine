@@ -144,6 +144,16 @@ class YoloDetectEngine(BaseEngine):
             },
         }
 
+    def unload(self) -> None:
+        self.model = None
+        try:
+            import torch
+
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except Exception as exc:
+            logger.debug("yolo unload empty_cache: %s", exc)
+
 
 class YoloSegmentEngine(YoloDetectEngine):
     """YOLO 实例分割（Ultralytics segment）。"""

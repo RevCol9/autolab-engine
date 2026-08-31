@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any, Dict, List, Optional
 
 from PIL import Image
@@ -11,6 +12,8 @@ from app.engines.locate_engine import _parse_categories
 from app.engines.sam3_worker import Sam3Worker, parse_boxes, parse_points
 from app.mask_format import SUPPORTED_MASK_FORMATS
 from app.settings import ModelConfig, Settings
+
+logger = logging.getLogger(__name__)
 
 
 class Sam3Engine(BaseEngine):
@@ -158,3 +161,17 @@ class Sam3Engine(BaseEngine):
             },
             "timings": {"total_request": timings_total, "generate": timings_total},
         }
+
+    def unload(self) -> None:
+        worker = self.worker
+        self.worker = None
+        if worker is not None:
+            worker.model = None
+            worker.processor = None
+        try:
+            import torch
+
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except Exception as exc:
+            logger.debug("sam3 unload empty_cache: %s", exc)

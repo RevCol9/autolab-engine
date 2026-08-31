@@ -5,19 +5,23 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import threading
 import time
+from contextlib import contextmanager
 from io import BytesIO
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterator, List, Optional
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from PIL import Image
 
+from app import runtime_state
 from app.box_format import SUPPORTED_BOX_FORMATS, apply_box_format
-from app.mask_format import SUPPORTED_MASK_FORMATS
 from app.engines.base import BaseEngine
 from app.engines.yolo import YoloDetectEngine, YoloSegmentEngine
+from app.gpu_lock import GpuDeviceLock
+from app.mask_format import SUPPORTED_MASK_FORMATS
 from app.settings import ModelConfig, Settings, apply_runtime_env, load_settings
 from app.test_ui import test_page
 
@@ -25,11 +29,11 @@ SETTINGS: Settings = load_settings()
 apply_runtime_env(SETTINGS)
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="autolab-engine", version="0.2.0")
+app = FastAPI(title="autolab-engine", version="0.3.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=True,
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -39,13 +43,31 @@ _engines: Dict[str, BaseEngine] = {}
 _active_key: Optional[str] = None
 _gpu_lock = threading.RLock()
 
+# 推理等待训练释放 GPU 的超时（秒）；加载大模型可适当加长
+GPU_INFER_TIMEOUT = float(os.environ.get("NIII_GPU_INFER_TIMEOUT", "120"))
+GPU_LOAD_TIMEOUT = float(os.environ.get("NIII_GPU_LOAD_TIMEOUT", "180"))
+
+# 单次批量上限，避免一次占满显存/超时
+BATCH_MAX_IMAGES = 32
+
 
 def is_vlm_engine(cfg: ModelConfig) -> bool:
     return (cfg.engine or "yolo").lower() in VLM_ENGINES
 
 
-# 单次批量上限，避免一次占满显存/超时
-BATCH_MAX_IMAGES = 32
+@contextmanager
+def _cross_gpu_session(cfg: ModelConfig, *, timeout: float = GPU_INFER_TIMEOUT) -> Iterator[None]:
+    """与训练进程共享的 GPU 文件锁；超时返回 503。"""
+    lock = GpuDeviceLock(cfg.device)
+    if not lock.acquire(blocking=True, timeout=timeout):
+        raise HTTPException(
+            status_code=503,
+            detail="GPU 正被训练或其它任务占用，请稍后重试",
+        )
+    try:
+        yield
+    finally:
+        lock.release()
 
 
 def get_model_config(model_key: Optional[str]) -> ModelConfig:
@@ -79,22 +101,22 @@ def build_engine(config: ModelConfig) -> BaseEngine:
 
 
 def ensure_model_engine(model_key: Optional[str] = None) -> BaseEngine:
+    """将模型加载到进程内缓存；调用方须已持有 ``_gpu_lock`` 与跨进程 GPU 锁。"""
     global _active_key
     cfg = get_model_config(model_key)
-    with _gpu_lock:
-        if cfg.key in _engines:
-            _active_key = cfg.key
-            return _engines[cfg.key]
-        if not cfg.path:
-            raise HTTPException(
-                status_code=503,
-                detail=f"模型 {cfg.key} 尚未配置路径（models[].path 为空）",
-            )
-        engine = build_engine(cfg)
-        engine.load()
-        _engines[cfg.key] = engine
+    if cfg.key in _engines:
         _active_key = cfg.key
-        return engine
+        return _engines[cfg.key]
+    if not cfg.path:
+        raise HTTPException(
+            status_code=503,
+            detail=f"模型 {cfg.key} 尚未配置路径（models[].path 为空）",
+        )
+    engine = build_engine(cfg)
+    engine.load()
+    _engines[cfg.key] = engine
+    _active_key = cfg.key
+    return engine
 
 
 def _run_predict_locked(
@@ -102,9 +124,10 @@ def _run_predict_locked(
     cfg: ModelConfig,
     **kwargs: Any,
 ) -> Dict[str, Any]:
-    """串行化 GPU 推理，避免并发 load/predict 打满显存。"""
+    """进程内线程锁 + 跨进程 GPU 锁，串行化 load/predict。"""
     with _gpu_lock:
-        return _run_predict(img, cfg, **kwargs)
+        with _cross_gpu_session(cfg):
+            return _run_predict_unlocked(img, cfg, **kwargs)
 
 
 def _parse_image(raw: bytes, filename: str = "-") -> Image.Image:
@@ -134,40 +157,6 @@ def _normalize_box_format(box_format: Optional[str]) -> str:
             detail=f"不支持的 box_format: {box_format!r}，可选 {list(SUPPORTED_BOX_FORMATS)}",
         )
     return fmt
-
-
-def _run_predict(
-    img: Image.Image,
-    cfg: ModelConfig,
-    *,
-    conf: Optional[float],
-    iou: Optional[float],
-    imgsz: Optional[int],
-    box_format: str,
-    task: Optional[str] = None,
-    categories: str = "",
-    phrase: str = "",
-    sam3_threshold: Optional[float] = None,
-    sam3_points: Optional[str] = None,
-    sam3_boxes: Optional[str] = None,
-    mask_format: str = "polygon_norm_pct",
-) -> Dict[str, Any]:
-    with _gpu_lock:
-        return _run_predict_unlocked(
-            img,
-            cfg,
-            conf=conf,
-            iou=iou,
-            imgsz=imgsz,
-            box_format=box_format,
-            task=task,
-            categories=categories,
-            phrase=phrase,
-            sam3_threshold=sam3_threshold,
-            sam3_points=sam3_points,
-            sam3_boxes=sam3_boxes,
-            mask_format=mask_format,
-        )
 
 
 def _run_predict_unlocked(
@@ -280,7 +269,11 @@ def on_startup() -> None:
     default = get_model_config(None)
     if default.path and not is_vlm_engine(default):
         try:
-            ensure_model_engine(default.key)
+            with _gpu_lock:
+                with _cross_gpu_session(default, timeout=GPU_LOAD_TIMEOUT):
+                    ensure_model_engine(default.key)
+        except HTTPException as exc:
+            logger.warning("startup skip load default=%s: %s", default.key, exc.detail)
         except Exception as exc:
             logger.warning("startup skip load default=%s: %s", default.key, exc)
 
@@ -293,20 +286,20 @@ def test_inference_page():
 
 @app.get("/api/health")
 def health() -> dict:
+    cuda = runtime_state.probe_cuda()
+    weight = runtime_state.probe_default_weight(SETTINGS)
+    gpu_locks = runtime_state.probe_gpu_locks(SETTINGS)
+    degraded = not cuda.get("available") or not weight.get("ok")
     return {
-        "status": "ok",
+        "status": "degraded" if degraded else "ok",
         "default_model": SETTINGS.default_model,
         "active_model": _active_key,
         "loaded": list(_engines.keys()),
+        "cuda": cuda,
+        "default_weight": weight,
+        "gpu_locks": gpu_locks,
         "models": [
-            {
-                "key": m.key,
-                "name": m.name,
-                "task": m.task,
-                "engine": m.engine,
-                "path_configured": bool(m.path),
-                "loaded": m.key in _engines,
-            }
+            runtime_state.model_entry(m, loaded=m.key in _engines)
             for m in SETTINGS.models
         ],
     }
@@ -314,29 +307,31 @@ def health() -> dict:
 
 @app.get("/api/models")
 def models() -> dict:
-    """返回 config.yaml 中的模型清单"""
+    """返回 config.yaml 中的模型清单（不暴露权重绝对路径）。"""
     return {
         "default_model": SETTINGS.default_model,
         "loaded": list(_engines.keys()),
         "box_formats": list(SUPPORTED_BOX_FORMATS),
         "mask_formats": list(SUPPORTED_MASK_FORMATS),
         "models": [
-            {
-                "key": m.key,
-                "name": m.name,
-                "task": m.task,
-                "engine": m.engine,
-                "path": m.path,
-                "device": m.device,
-                "conf": m.conf,
-                "iou": m.iou,
-                "imgsz": m.imgsz,
-                "max_det": m.max_det,
-                "loaded": m.key in _engines,
-            }
+            runtime_state.model_entry(m, loaded=m.key in _engines)
             for m in SETTINGS.models
         ],
     }
+
+
+@app.get("/api/models/{model_key}/classes")
+def model_classes(model_key: str) -> dict:
+    """返回已加载或按需加载后的类别列表。"""
+    cfg = get_model_config(model_key)
+    with _gpu_lock:
+        with _cross_gpu_session(cfg, timeout=GPU_LOAD_TIMEOUT):
+            engine = ensure_model_engine(cfg.key)
+            return {
+                "model_key": cfg.key,
+                "classes": engine.classes(),
+                "loaded": list(_engines.keys()),
+            }
 
 
 @app.post("/api/models/{model_key}/load")
@@ -345,7 +340,9 @@ def load_model(model_key: str) -> dict:
     t0 = time.perf_counter()
     cfg = get_model_config(model_key)
     try:
-        engine = ensure_model_engine(cfg.key)
+        with _gpu_lock:
+            with _cross_gpu_session(cfg, timeout=GPU_LOAD_TIMEOUT):
+                engine = ensure_model_engine(cfg.key)
     except HTTPException:
         raise
     except FileNotFoundError as exc:
@@ -366,6 +363,41 @@ def load_model(model_key: str) -> dict:
         "loaded": list(_engines.keys()),
         "timings": {"load": cost},
     }
+
+
+@app.post("/api/models/{model_key}/unload")
+def unload_model(model_key: str) -> dict:
+    """从 GPU 卸载指定模型，释放显存。"""
+    global _active_key
+    cfg = get_model_config(model_key)
+    with _gpu_lock:
+        if cfg.key not in _engines:
+            return {
+                "status": "ok",
+                "model_key": cfg.key,
+                "unloaded": False,
+                "message": "模型未在内存中",
+                "loaded": list(_engines.keys()),
+            }
+        loaded, _active_key = runtime_state.unload_engine(cfg.key, _engines, _active_key)
+    return {
+        "status": "ok",
+        "model_key": cfg.key,
+        "unloaded": True,
+        "loaded": loaded,
+        "active_model": _active_key,
+    }
+
+
+@app.post("/api/models/unload_all")
+def unload_all_models() -> dict:
+    """卸载所有已加载模型。"""
+    global _active_key
+    with _gpu_lock:
+        count = len(_engines)
+        runtime_state.unload_all_engines(_engines)
+        _active_key = None
+    return {"status": "ok", "unloaded_count": count, "loaded": []}
 
 
 @app.post("/api/predict")
@@ -541,7 +573,11 @@ async def predict_batch(
     logger.debug("batch %s | n=%s | fmt=%s", cfg.key, n, fmt)
 
     try:
-        ensure_model_engine(cfg.key)
+        with _gpu_lock:
+            with _cross_gpu_session(cfg, timeout=GPU_LOAD_TIMEOUT):
+                ensure_model_engine(cfg.key)
+    except HTTPException as exc:
+        raise exc
     except FileNotFoundError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     except NotImplementedError as exc:

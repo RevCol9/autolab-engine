@@ -24,3 +24,7 @@ class BaseEngine(ABC):
 
     def classes(self) -> List[str]:
         return []
+
+    def unload(self) -> None:
+        """释放引擎占用的 GPU 显存；默认无操作。"""
+        return
