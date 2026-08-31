@@ -1,5 +1,7 @@
 # autolab-engine 架构说明
 
+详细说明见本地 [`docs/architecture.md`](docs/architecture.md)、[`docs/data-transfer.md`](docs/data-transfer.md)、[`docs/roadmap.md`](docs/roadmap.md)（`docs/` 不入库）。
+
 本仓库提供两个独立 HTTP 服务，由 systemd 分别管理：
 
 | 服务 | 入口 | 默认端口 | 配置文件 |

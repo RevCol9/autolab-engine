@@ -14,7 +14,7 @@
 - 已配置但未提供可用推理服务：接口返回 `not_deployed` 或 `unavailable`。
 - 请求超时：接口返回 `timeout`，现有建议和手工标注不会丢失。
 
-SAM3 和 Locate Anything 的 API 契约由 autolab-engine 推理服务（`:21010`）提供，见 `docs/06-locate-sam3.md`、`docs/08-segment-api.md`。
+SAM3 和 Locate Anything 的 API 契约由 autolab-engine 推理服务（`:21010`）提供，见 `:21010/docs` 与 [`docs/data-transfer.md`](../docs/data-transfer.md)。
 
 ## Autolab 自有模型
 
