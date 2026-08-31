@@ -9,6 +9,8 @@ docs/
 !.env.example
 config.yaml
 config.local.yaml
+annotation/config.yaml
+training/config.yaml
 
 # python
 __pycache__/

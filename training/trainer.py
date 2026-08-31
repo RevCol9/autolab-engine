@@ -15,7 +15,7 @@ from training.paths import CLOSED_LOOP_TRAIN_SCRIPT, YOLO_PYTHON, train_save_dir
 logger = logging.getLogger(__name__)
 
 
-def build_closed_loop_cmd(param: Dict[str, Any], *, device: str = "0") -> list[str]:
+def build_closed_loop_cmd(param: Dict[str, Any], *, device: Optional[str] = None) -> list[str]:
     """写入 train_config.yaml 并组装 closed_loop_train 子进程命令。"""
     config_path = write_job_train_config(param, device=device)
     return [
@@ -46,7 +46,7 @@ def collect_train_result(save_dir: Path) -> Dict[str, Any]:
 def popen_detection_train(
     param: Dict[str, Any],
     *,
-    device: str = "0",
+    device: Optional[str] = None,
     cwd: Optional[str] = None,
 ) -> subprocess.Popen:
     """异步启动训练子进程；stdout/stderr 追加到 save_dir/train.log。"""

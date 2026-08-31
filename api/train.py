@@ -10,6 +10,7 @@ from typing import Any, Dict, Optional
 from fastapi import FastAPI, HTTPException, Query
 from pydantic import BaseModel, Field
 
+from training.settings import default_training_device, resolve_training_device
 from shared.gpu_lock import GpuDeviceLock, parse_device_index
 from training.paths import STORAGE_ROOT, YOLO_PYTHON
 from training.service import MANAGER
@@ -30,7 +31,7 @@ class TrainDetectionBody(BaseModel):
     model: Optional[str] = None
     is_continue: Optional[Any] = None
     last_train: Optional[str] = None
-    device: Optional[str] = "0"
+    device: Optional[str] = None
 
     class Config:
         extra = "allow"
@@ -70,7 +71,7 @@ def _probe_yolo_python() -> Dict[str, Any]:
 @app.get("/api/health")
 def health() -> Dict[str, Any]:
     cur = MANAGER.current()
-    device = "0"
+    device = default_training_device()
     if cur and cur.get("device"):
         device = str(cur["device"])
     gpu_busy = GpuDeviceLock(device).is_held_by_other()
@@ -145,7 +146,8 @@ def _train_detection(body: TrainDetectionBody) -> Dict[str, Any]:
 
     param: Dict[str, Any] = body.model_dump(exclude_none=True)
     param.pop("action", None)
-    device = str(param.pop("device", "0") or "0")
+    device_raw = param.pop("device", None)
+    device = resolve_training_device(device_raw)
 
     try:
         job = MANAGER.start(param, device=device)

@@ -8,6 +8,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, Optional
 
+from training.settings import resolve_training_device
 from shared.gpu_lock import GpuDeviceLock
 from training.paths import train_save_dir
 from training.progress import read_job_progress
@@ -94,7 +95,7 @@ class JobManager:
             return True
         return False
 
-    def start(self, param: Dict[str, Any], *, device: str = "0") -> Dict[str, Any]:
+    def start(self, param: Dict[str, Any], *, device: Optional[str] = None) -> Dict[str, Any]:
         with self._lock:
             if self._is_busy_locked():
                 job = self._job
@@ -104,7 +105,12 @@ class JobManager:
 
             self._counter += 1
             job_id = f"train-{self._counter}-{int(time.time())}"
-            job = TrainJob(job_id=job_id, param=dict(param), status="pending", device=str(device or "0"))
+            job = TrainJob(
+                job_id=job_id,
+                param=dict(param),
+                status="pending",
+                device=resolve_training_device(device),
+            )
             self._job = job
 
         gpu_lock = GpuDeviceLock(job.device)

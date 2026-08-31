@@ -1,17 +1,16 @@
-"""训练超参：API JSON → Ultralytics YAML 配置。"""
+"""训练超参：config.yaml + API JSON → Ultralytics train_config.yaml。"""
 
 from __future__ import annotations
 
 from copy import deepcopy
 from pathlib import Path
-from typing import Any, Dict, Mapping
+from typing import Any, Dict, Mapping, Optional
 
 import yaml
 
+from training.settings import resolve_training_device, training_ultralytics_defaults
 from training.data_yaml import prepare_data_yaml_for_job
 from training.paths import baseline_pt_from_last_train, train_save_dir
-
-TRAIN_DEFAULTS_PATH = Path(__file__).resolve().parent / "config" / "train_defaults.yaml"
 
 # Java/API 字段 → Ultralytics 字段
 API_FIELD_ALIASES: Dict[str, str] = {
@@ -28,6 +27,7 @@ JOB_META_KEYS = frozenset(
         "trainNum",
         "is_continue",
         "last_train",
+        "device",
     }
 )
 
@@ -58,13 +58,13 @@ def resolve_model_path(param: Mapping[str, Any]) -> str:
 
 
 def load_train_defaults() -> Dict[str, Any]:
-    if not TRAIN_DEFAULTS_PATH.is_file():
-        raise FileNotFoundError(f"训练默认配置不存在: {TRAIN_DEFAULTS_PATH}")
-    with TRAIN_DEFAULTS_PATH.open("r", encoding="utf-8") as f:
-        data = yaml.safe_load(f) or {}
-    if not isinstance(data, dict):
-        raise ValueError(f"训练默认配置格式错误: {TRAIN_DEFAULTS_PATH}")
-    return data
+    """从 training/config.yaml 读取 Ultralytics 默认超参。"""
+    defaults = training_ultralytics_defaults()
+    if not defaults:
+        raise ValueError(
+            "training/config.yaml 缺少 Ultralytics 超参；请参考 training/config.example.yaml"
+        )
+    return deepcopy(defaults)
 
 
 def normalize_api_param(param: Mapping[str, Any]) -> Dict[str, Any]:
@@ -81,9 +81,9 @@ def normalize_api_param(param: Mapping[str, Any]) -> Dict[str, Any]:
 def build_job_train_config(
     param: Mapping[str, Any],
     *,
-    device: str = "0",
+    device: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """合并默认配置、API 参数与任务路径，生成 train_config.yaml 内容。"""
+    """合并 config 默认、API 参数与任务路径，生成 train_config.yaml 内容。"""
     project_id = str(param["projectId"])
     task_id = str(param["taskId"])
     train_num = str(param["trainNum"])
@@ -92,7 +92,7 @@ def build_job_train_config(
     save_path = train_save_dir(project_id, task_id, train_num)
     save_path.mkdir(parents=True, exist_ok=True)
 
-    config: Dict[str, Any] = deepcopy(load_train_defaults())
+    config: Dict[str, Any] = load_train_defaults()
     config.update(normalize_api_param(param))
     config.update(
         {
@@ -101,7 +101,7 @@ def build_job_train_config(
             "project": str(save_path.parent),
             "name": save_path.name,
             "save_dir": str(save_path),
-            "device": str(device or config.get("device") or "0"),
+            "device": resolve_training_device(device),
         }
     )
     return config
@@ -115,7 +115,7 @@ def write_train_config(config: Mapping[str, Any], path: Path) -> Path:
     return path
 
 
-def write_job_train_config(param: Mapping[str, Any], *, device: str = "0") -> Path:
+def write_job_train_config(param: Mapping[str, Any], *, device: Optional[str] = None) -> Path:
     config = build_job_train_config(param, device=device)
     save_dir = Path(str(config["save_dir"]))
     return write_train_config(config, save_dir / "train_config.yaml")

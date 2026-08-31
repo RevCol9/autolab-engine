@@ -10,10 +10,10 @@ from typing import Any, Dict, List, Optional, Union
 
 import yaml
 
-ROOT_DIR = Path(__file__).resolve().parent.parent
+ANNOTATION_DIR = Path(__file__).resolve().parent
 DEFAULT_CONFIG_CANDIDATES = (
-    ROOT_DIR / "config.yaml",
-    ROOT_DIR / "config.example.yaml",
+    ANNOTATION_DIR / "config.yaml",
+    ANNOTATION_DIR / "config.example.yaml",
 )
 
 
@@ -123,7 +123,10 @@ def resolve_config_path(explicit: Optional[str] = None) -> Path:
         if not path.is_file():
             raise FileNotFoundError(f"配置文件不存在: {path}")
         return path
-    env_path = os.getenv("CONFIG_PATH", "").strip()
+    env_path = (
+        os.getenv("ANNOTATION_CONFIG_PATH", "").strip()
+        or os.getenv("CONFIG_PATH", "").strip()
+    )
     if env_path:
         path = Path(env_path).expanduser().resolve()
         if not path.is_file():
@@ -133,7 +136,7 @@ def resolve_config_path(explicit: Optional[str] = None) -> Path:
         if candidate.is_file():
             return candidate
     raise FileNotFoundError(
-        f"未找到配置文件: {ROOT_DIR / 'config.yaml'} 或 {ROOT_DIR / 'config.example.yaml'}"
+        f"未找到配置文件: {ANNOTATION_DIR / 'config.yaml'} 或 config.example.yaml"
     )
 
 
