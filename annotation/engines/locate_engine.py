@@ -7,8 +7,8 @@ from typing import Any, Dict, List, Optional
 
 from PIL import Image
 
-from app.engines.base import BaseEngine
-from app.engines.box_postprocess import (
+from annotation.engines.base import BaseEngine
+from annotation.engines.box_postprocess import (
     build_detect_prompt,
     build_ground_gui_prompt,
     build_ground_multi_prompt,
@@ -17,9 +17,9 @@ from app.engines.box_postprocess import (
     build_point_prompt,
     refine_detections,
 )
-from app.engines.locate_worker import LocateAnythingWorker
-from app.engines.prompt_utils import parse_categories
-from app.settings import ModelConfig, Settings
+from annotation.engines.locate_worker import LocateAnythingWorker
+from annotation.engines.prompt_utils import parse_categories
+from annotation.settings import ModelConfig, Settings
 
 logger = logging.getLogger(__name__)
 
@@ -37,7 +37,7 @@ class LocateEngine(BaseEngine):
             import torch
 
             n = torch.cuda.device_count() if torch.cuda.is_available() else 1
-            from app.settings import expand_max_memory
+            from annotation.settings import expand_max_memory
 
             max_memory = expand_max_memory(max_memory, n)
         self.worker = LocateAnythingWorker(

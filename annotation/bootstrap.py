@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from app.settings import Settings, apply_runtime_env, load_settings
+from annotation.settings import Settings, apply_runtime_env, load_settings
 
 SETTINGS: Settings = load_settings()
 apply_runtime_env(SETTINGS)

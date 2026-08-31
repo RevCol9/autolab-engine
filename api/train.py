@@ -10,7 +10,7 @@ from typing import Any, Dict, Optional
 from fastapi import FastAPI, HTTPException, Query
 from pydantic import BaseModel, Field
 
-from app.gpu_lock import GpuDeviceLock, parse_device_index
+from shared.gpu_lock import GpuDeviceLock, parse_device_index
 from training.paths import STORAGE_ROOT, YOLO_PYTHON
 from training.service import MANAGER
 

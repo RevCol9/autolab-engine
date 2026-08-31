@@ -9,11 +9,11 @@ from typing import Dict, Iterator, Optional
 
 from fastapi import HTTPException
 
-from app.bootstrap import SETTINGS
-from app.engines.base import BaseEngine
-from app.engines.yolo import YoloDetectEngine, YoloSegmentEngine
-from app.gpu_lock import GpuDeviceLock
-from app.settings import ModelConfig
+from annotation.bootstrap import SETTINGS
+from annotation.engines.base import BaseEngine
+from annotation.engines.yolo import YoloDetectEngine, YoloSegmentEngine
+from shared.gpu_lock import GpuDeviceLock
+from annotation.settings import ModelConfig
 
 VLM_ENGINES = frozenset({"locateanything", "sam3"})
 _engines: Dict[str, BaseEngine] = {}
@@ -68,11 +68,11 @@ def get_model_config(model_key: Optional[str]) -> ModelConfig:
 def build_engine(config: ModelConfig) -> BaseEngine:
     eng = (config.engine or "yolo").lower()
     if eng == "locateanything":
-        from app.engines.locate_engine import LocateEngine
+        from annotation.engines.locate_engine import LocateEngine
 
         return LocateEngine(config, SETTINGS)
     if eng == "sam3":
-        from app.engines.sam3_engine import Sam3Engine
+        from annotation.engines.sam3_engine import Sam3Engine
 
         return Sam3Engine(config, SETTINGS)
     task = (config.task or "detect").lower()

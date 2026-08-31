@@ -7,11 +7,11 @@ from typing import Any, Dict, List, Optional
 
 from PIL import Image
 
-from app.engines.base import BaseEngine
-from app.engines.prompt_utils import parse_categories
-from app.engines.sam3_worker import Sam3Worker, parse_boxes, parse_points
-from app.mask_format import SUPPORTED_MASK_FORMATS
-from app.settings import ModelConfig, Settings
+from annotation.engines.base import BaseEngine
+from annotation.engines.prompt_utils import parse_categories
+from annotation.engines.sam3_worker import Sam3Worker, parse_boxes, parse_points
+from annotation.mask_format import SUPPORTED_MASK_FORMATS
+from annotation.settings import ModelConfig, Settings
 
 logger = logging.getLogger(__name__)
 

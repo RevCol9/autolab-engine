@@ -9,17 +9,17 @@ from typing import Any, Dict, List, Optional
 from fastapi import HTTPException
 from PIL import Image
 
-from app.bootstrap import SETTINGS
-from app.box_format import apply_box_format
-from app.mask_format import SUPPORTED_MASK_FORMATS
-from app.box_format import SUPPORTED_BOX_FORMATS
-from app.registry import (
+from annotation.bootstrap import SETTINGS
+from annotation.box_format import apply_box_format
+from annotation.mask_format import SUPPORTED_MASK_FORMATS
+from annotation.box_format import SUPPORTED_BOX_FORMATS
+from annotation.registry import (
     _gpu_lock,
     cross_gpu_session,
     ensure_model_engine,
     is_vlm_engine,
 )
-from app.settings import ModelConfig
+from annotation.settings import ModelConfig
 
 
 def parse_image(raw: bytes, filename: str = "-") -> Image.Image:

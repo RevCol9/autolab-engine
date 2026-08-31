@@ -7,7 +7,7 @@ from typing import Any, Dict, List
 
 from PIL import Image
 
-from app.settings import ModelConfig
+from annotation.settings import ModelConfig
 
 
 class BaseEngine(ABC):

@@ -6,9 +6,9 @@ import logging
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from app.engines.base import BaseEngine
-from app.gpu_lock import GpuDeviceLock, parse_device_index
-from app.settings import ModelConfig, Settings
+from annotation.engines.base import BaseEngine
+from shared.gpu_lock import GpuDeviceLock, parse_device_index
+from annotation.settings import ModelConfig, Settings
 
 logger = logging.getLogger(__name__)
 

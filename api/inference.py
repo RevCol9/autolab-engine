@@ -10,18 +10,18 @@ from typing import Any, Dict, List, Optional
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 
-from app import runtime_state
-from app.bootstrap import SETTINGS
-from app.box_format import SUPPORTED_BOX_FORMATS
-from app.mask_format import SUPPORTED_MASK_FORMATS
-from app.predict_core import (
+from annotation import runtime_state
+from annotation.bootstrap import SETTINGS
+from annotation.box_format import SUPPORTED_BOX_FORMATS
+from annotation.mask_format import SUPPORTED_MASK_FORMATS
+from annotation.predict_core import (
     normalize_box_format,
     normalize_mask_format,
     parse_image,
     parse_image_ids,
     run_predict_locked,
 )
-from app.registry import (
+from annotation.registry import (
     BATCH_MAX_IMAGES,
     GPU_LOAD_TIMEOUT,
     _engines,
@@ -33,10 +33,10 @@ from app.registry import (
     is_vlm_engine,
     set_active_key,
 )
-from app.test_ui import test_page
+from annotation.test_ui import test_page
 
 # 供测试与外部脚本复用
-from app.registry import ensure_model_engine, get_model_config  # noqa: F401
+from annotation.registry import ensure_model_engine, get_model_config  # noqa: F401
 
 logger = logging.getLogger(__name__)
 

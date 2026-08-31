@@ -8,7 +8,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, Optional
 
-from app.gpu_lock import GpuDeviceLock
+from shared.gpu_lock import GpuDeviceLock
 from training.paths import train_save_dir
 from training.progress import read_job_progress
 from training.trainer import collect_train_result, kill_process_group, popen_detection_train

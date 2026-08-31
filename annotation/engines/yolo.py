@@ -9,8 +9,8 @@ from typing import Any, Dict, List, Optional
 
 from PIL import Image
 
-from app.engines.base import BaseEngine
-from app.settings import ModelConfig
+from annotation.engines.base import BaseEngine
+from annotation.settings import ModelConfig
 
 logger = logging.getLogger(__name__)
 
@@ -170,7 +170,7 @@ class YoloSegmentEngine(YoloDetectEngine):
         mask_format: str = "polygon_norm_pct",
         **kwargs: Any,
     ) -> Dict[str, Any]:
-        from app.mask_format import SUPPORTED_MASK_FORMATS, segments_from_yolo_polys
+        from annotation.mask_format import SUPPORTED_MASK_FORMATS, segments_from_yolo_polys
 
         if mask_format not in SUPPORTED_MASK_FORMATS:
             raise ValueError(f"不支持的 mask_format: {mask_format!r}")
@@ -248,7 +248,7 @@ class YoloSegmentEngine(YoloDetectEngine):
                         boxes_xyxy=xyxy,
                     )
                 elif r0.masks is not None and hasattr(r0.masks, "data"):
-                    from app.mask_format import segments_from_bool_masks
+                    from annotation.mask_format import segments_from_bool_masks
 
                     md = r0.masks.data.detach().cpu().numpy()
                     segments = segments_from_bool_masks(

@@ -18,7 +18,7 @@ if __name__ == "__main__":
     host = os.environ.get("AUTOLAB_TRAIN_HOST", "0.0.0.0")
     port = int(os.environ.get("AUTOLAB_TRAIN_PORT", "21011"))
     uvicorn.run(
-        "training.api:app",
+        "api.train:app",
         host=host,
         port=port,
         workers=1,

@@ -259,7 +259,7 @@ class Sam3Worker:
         mask_areas = [int(mask.sum()) for mask in masks]
         elapsed = time.perf_counter() - t0
 
-        from app.mask_format import segments_from_bool_masks
+        from annotation.mask_format import segments_from_bool_masks
 
         box_list = [[b["x1"], b["y1"], b["x2"], b["y2"]] for b in parsed_boxes]
         label_list = [b.get("label") or label for b in parsed_boxes]

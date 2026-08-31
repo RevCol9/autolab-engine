@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """启动 autolab-engine 推理服务。"""
 
-from app.bootstrap import SETTINGS
-from app.main import app
+from annotation.bootstrap import SETTINGS
+from api.inference import app
 import uvicorn
 
 if __name__ == "__main__":
