@@ -148,7 +148,7 @@ def _train_detection(body: TrainDetectionBody) -> Dict[str, Any]:
     device = str(param.pop("device", "0") or "0")
 
     try:
-        job = MANAGER.start(param, sync=False, device=device)
+        job = MANAGER.start(param, device=device)
         return {"status": "success", "job": job}
     except RuntimeError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc

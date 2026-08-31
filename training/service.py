@@ -11,12 +11,7 @@ from typing import Any, Dict, Optional
 from app.gpu_lock import GpuDeviceLock
 from training.paths import train_save_dir
 from training.progress import read_job_progress
-from training.trainer import (
-    collect_train_result,
-    kill_process_group,
-    popen_detection_train,
-    run_detection_train,
-)
+from training.trainer import collect_train_result, kill_process_group, popen_detection_train
 
 logger = logging.getLogger(__name__)
 
@@ -99,7 +94,7 @@ class JobManager:
             return True
         return False
 
-    def start(self, param: Dict[str, Any], *, sync: bool = False, device: str = "0") -> Dict[str, Any]:
+    def start(self, param: Dict[str, Any], *, device: str = "0") -> Dict[str, Any]:
         with self._lock:
             if self._is_busy_locked():
                 job = self._job
@@ -120,13 +115,6 @@ class JobManager:
                 job.finished_at = time.time()
             raise RuntimeError("GPU 正被推理占用，无法启动训练")
         job._gpu_lock = gpu_lock
-
-        if sync:
-            try:
-                return self._start_sync(job, param, device=device)
-            except Exception:
-                self._release_gpu_lock(job)
-                raise
 
         try:
             proc = popen_detection_train(param, device=device)
@@ -189,31 +177,6 @@ class JobManager:
                 logger.warning("stop train failed: %s", exc)
         self._release_gpu_lock(job)
         return {"stopped": True, "job_id": job.job_id, "pid": pid, "job": snapshot}
-
-    def _start_sync(self, job: TrainJob, param: Dict[str, Any], *, device: str) -> Dict[str, Any]:
-        try:
-            with self._lock:
-                if job.status == "stopped":
-                    return self._snapshot(job)
-                job.status = "running"
-                job.started_at = time.time()
-            result = run_detection_train(param, device=device)
-            with self._lock:
-                if job.status == "stopped":
-                    return self._snapshot(job)
-                job.status = "finished"
-                job.result = result
-                job.finished_at = time.time()
-            return self._snapshot(job)
-        except Exception as exc:
-            with self._lock:
-                if job.status != "stopped":
-                    job.status = "failed"
-                    job.error = str(exc)
-                    job.finished_at = time.time()
-            raise
-        finally:
-            self._release_gpu_lock(job)
 
     def _wait_for_proc(self, job: TrainJob, proc: Any, param: Dict[str, Any]) -> None:
         code = proc.wait()

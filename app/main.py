@@ -1,35 +1,46 @@
-"""FastAPI 入口：模型加载与单图/批量推理 API。"""
+"""FastAPI 入口：挂载推理 HTTP 路由。"""
 
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
-import os
-import threading
 import time
-from contextlib import contextmanager
-from io import BytesIO
-from typing import Any, Dict, Iterator, List, Optional
+from typing import Any, Dict, List, Optional
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from PIL import Image
 
 from app import runtime_state
-from app.box_format import SUPPORTED_BOX_FORMATS, apply_box_format
-from app.engines.base import BaseEngine
-from app.engines.yolo import YoloDetectEngine, YoloSegmentEngine
-from app.gpu_lock import GpuDeviceLock
+from app.bootstrap import SETTINGS
+from app.box_format import SUPPORTED_BOX_FORMATS
 from app.mask_format import SUPPORTED_MASK_FORMATS
-from app.settings import ModelConfig, Settings, apply_runtime_env, load_settings
+from app.predict_core import (
+    normalize_box_format,
+    normalize_mask_format,
+    parse_image,
+    parse_image_ids,
+    run_predict_locked,
+)
+from app.registry import (
+    BATCH_MAX_IMAGES,
+    GPU_LOAD_TIMEOUT,
+    _engines,
+    _gpu_lock,
+    active_key,
+    cross_gpu_session,
+    ensure_model_engine,
+    get_model_config,
+    is_vlm_engine,
+    set_active_key,
+)
 from app.test_ui import test_page
 
-SETTINGS: Settings = load_settings()
-apply_runtime_env(SETTINGS)
+# 供测试与外部脚本复用
+from app.registry import ensure_model_engine, get_model_config  # noqa: F401
+
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="autolab-engine", version="0.3.0")
+app = FastAPI(title="autolab-engine", version="0.3.1")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -38,231 +49,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-VLM_ENGINES = frozenset({"locateanything", "sam3"})
-_engines: Dict[str, BaseEngine] = {}
-_active_key: Optional[str] = None
-_gpu_lock = threading.RLock()
-
-# 推理等待训练释放 GPU 的超时（秒）；加载大模型可适当加长
-GPU_INFER_TIMEOUT = float(os.environ.get("NIII_GPU_INFER_TIMEOUT", "120"))
-GPU_LOAD_TIMEOUT = float(os.environ.get("NIII_GPU_LOAD_TIMEOUT", "180"))
-
-# 单次批量上限，避免一次占满显存/超时
-BATCH_MAX_IMAGES = 32
-
-
-def is_vlm_engine(cfg: ModelConfig) -> bool:
-    return (cfg.engine or "yolo").lower() in VLM_ENGINES
-
-
-@contextmanager
-def _cross_gpu_session(cfg: ModelConfig, *, timeout: float = GPU_INFER_TIMEOUT) -> Iterator[None]:
-    """与训练进程共享的 GPU 文件锁；超时返回 503。"""
-    lock = GpuDeviceLock(cfg.device)
-    if not lock.acquire(blocking=True, timeout=timeout):
-        raise HTTPException(
-            status_code=503,
-            detail="GPU 正被训练或其它任务占用，请稍后重试",
-        )
-    try:
-        yield
-    finally:
-        lock.release()
-
-
-def get_model_config(model_key: Optional[str]) -> ModelConfig:
-    key = (model_key or SETTINGS.default_model or "").strip()
-    if not SETTINGS.models:
-        raise HTTPException(status_code=500, detail="config.yaml 未配置 models")
-    if not key:
-        return SETTINGS.models[0]
-    for m in SETTINGS.models:
-        if m.key == key:
-            return m
-    raise HTTPException(status_code=400, detail=f"未知 model_key: {key}")
-
-
-def build_engine(config: ModelConfig) -> BaseEngine:
-    eng = (config.engine or "yolo").lower()
-    if eng == "locateanything":
-        from app.engines.locate_engine import LocateEngine
-
-        return LocateEngine(config, SETTINGS)
-    if eng == "sam3":
-        from app.engines.sam3_engine import Sam3Engine
-
-        return Sam3Engine(config, SETTINGS)
-    task = (config.task or "detect").lower()
-    if task == "detect":
-        return YoloDetectEngine(config)
-    if task == "segment":
-        return YoloSegmentEngine(config)
-    raise HTTPException(status_code=400, detail=f"不支持的 task: {task}")
-
-
-def ensure_model_engine(model_key: Optional[str] = None) -> BaseEngine:
-    """将模型加载到进程内缓存；调用方须已持有 ``_gpu_lock`` 与跨进程 GPU 锁。"""
-    global _active_key
-    cfg = get_model_config(model_key)
-    if cfg.key in _engines:
-        _active_key = cfg.key
-        return _engines[cfg.key]
-    if not cfg.path:
-        raise HTTPException(
-            status_code=503,
-            detail=f"模型 {cfg.key} 尚未配置路径（models[].path 为空）",
-        )
-    engine = build_engine(cfg)
-    engine.load()
-    _engines[cfg.key] = engine
-    _active_key = cfg.key
-    return engine
-
-
-def _run_predict_locked(
-    img: Image.Image,
-    cfg: ModelConfig,
-    **kwargs: Any,
-) -> Dict[str, Any]:
-    """进程内线程锁 + 跨进程 GPU 锁，串行化 load/predict。"""
-    with _gpu_lock:
-        with _cross_gpu_session(cfg):
-            return _run_predict_unlocked(img, cfg, **kwargs)
-
-
-def _parse_image(raw: bytes, filename: str = "-") -> Image.Image:
-    if not raw:
-        raise HTTPException(status_code=400, detail=f"空图片: {filename}")
-    try:
-        return Image.open(BytesIO(raw)).convert("RGB")
-    except Exception as exc:
-        raise HTTPException(status_code=400, detail=f"无法解析图片 {filename}: {exc}") from exc
-
-
-def _normalize_mask_format(mask_format: Optional[str]) -> str:
-    fmt = (mask_format or "polygon_norm_pct").strip().lower()
-    if fmt not in SUPPORTED_MASK_FORMATS:
-        raise HTTPException(
-            status_code=400,
-            detail=f"不支持的 mask_format: {mask_format!r}，可选 {list(SUPPORTED_MASK_FORMATS)}",
-        )
-    return fmt
-
-
-def _normalize_box_format(box_format: Optional[str]) -> str:
-    fmt = (box_format or "xyxy").strip().lower()
-    if fmt not in SUPPORTED_BOX_FORMATS:
-        raise HTTPException(
-            status_code=400,
-            detail=f"不支持的 box_format: {box_format!r}，可选 {list(SUPPORTED_BOX_FORMATS)}",
-        )
-    return fmt
-
-
-def _run_predict_unlocked(
-    img: Image.Image,
-    cfg: ModelConfig,
-    *,
-    conf: Optional[float],
-    iou: Optional[float],
-    imgsz: Optional[int],
-    box_format: str,
-    task: Optional[str] = None,
-    categories: str = "",
-    phrase: str = "",
-    sam3_threshold: Optional[float] = None,
-    sam3_points: Optional[str] = None,
-    sam3_boxes: Optional[str] = None,
-    mask_format: str = "polygon_norm_pct",
-) -> Dict[str, Any]:
-    if is_vlm_engine(cfg):
-        try:
-            engine = ensure_model_engine(cfg.key)
-            result = engine.predict(
-                img,
-                task=task,
-                categories=categories,
-                phrase=phrase,
-                sam3_threshold=sam3_threshold,
-                sam3_points=sam3_points,
-                sam3_boxes=sam3_boxes,
-                conf=conf,
-                mask_format=mask_format,
-            )
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-        w = int(result.get("image_width") or img.width)
-        h = int(result.get("image_height") or img.height)
-        result["boxes"] = apply_box_format(
-            result.get("boxes") or [],
-            image_width=w,
-            image_height=h,
-            box_format=box_format,
-            coord_space="pixel",
-        )
-        result["box_format"] = box_format
-        result["mask_format"] = mask_format
-        result["model_key"] = cfg.key
-        result["model_name"] = cfg.name
-        result["engine"] = cfg.engine
-        if "segments" not in result:
-            result["segments"] = []
-        return result
-
-    engine = ensure_model_engine(cfg.key)
-    is_segment = (cfg.task or "detect").lower() == "segment"
-    if is_segment:
-        result = engine.predict(
-            img,
-            conf=conf,
-            iou=iou,
-            imgsz=imgsz,
-            coord_space=SETTINGS.coord_space,
-            mask_format=mask_format,
-        )
-    else:
-        result = engine.predict(
-            img,
-            conf=conf,
-            iou=iou,
-            imgsz=imgsz,
-            coord_space=SETTINGS.coord_space,
-        )
-        result.setdefault("annotation_type", "box")
-        result.setdefault("segments", [])
-    result["boxes"] = apply_box_format(
-        result.get("boxes") or [],
-        image_width=int(result.get("image_width") or img.width),
-        image_height=int(result.get("image_height") or img.height),
-        box_format=box_format,
-        coord_space=SETTINGS.coord_space,
-    )
-    result["box_format"] = box_format
-    result["mask_format"] = mask_format if is_segment else result.get("mask_format")
-    result["model_key"] = cfg.key
-    result["model_name"] = cfg.name
-    result["engine"] = cfg.engine or "yolo"
-    return result
-
-
-def _parse_image_ids(raw: Optional[str], n: int) -> List[str]:
-    if raw is None or str(raw).strip() == "":
-        return [str(i) for i in range(n)]
-    text = str(raw).strip()
-    try:
-        data = json.loads(text)
-        if isinstance(data, list) and len(data) == n:
-            return [str(x) for x in data]
-    except json.JSONDecodeError:
-        pass
-    parts = [p.strip() for p in text.split(",")]
-    if len(parts) == n:
-        return parts
-    raise HTTPException(
-        status_code=400,
-        detail=f"image_ids 数量需与 images 一致（期望 {n}，实际无法解析）",
-    )
-
 
 @app.on_event("startup")
 def on_startup() -> None:
@@ -270,7 +56,7 @@ def on_startup() -> None:
     if default.path and not is_vlm_engine(default):
         try:
             with _gpu_lock:
-                with _cross_gpu_session(default, timeout=GPU_LOAD_TIMEOUT):
+                with cross_gpu_session(default, timeout=GPU_LOAD_TIMEOUT):
                     ensure_model_engine(default.key)
         except HTTPException as exc:
             logger.warning("startup skip load default=%s: %s", default.key, exc.detail)
@@ -293,7 +79,7 @@ def health() -> dict:
     return {
         "status": "degraded" if degraded else "ok",
         "default_model": SETTINGS.default_model,
-        "active_model": _active_key,
+        "active_model": active_key(),
         "loaded": list(_engines.keys()),
         "cuda": cuda,
         "default_weight": weight,
@@ -325,7 +111,7 @@ def model_classes(model_key: str) -> dict:
     """返回已加载或按需加载后的类别列表。"""
     cfg = get_model_config(model_key)
     with _gpu_lock:
-        with _cross_gpu_session(cfg, timeout=GPU_LOAD_TIMEOUT):
+        with cross_gpu_session(cfg, timeout=GPU_LOAD_TIMEOUT):
             engine = ensure_model_engine(cfg.key)
             return {
                 "model_key": cfg.key,
@@ -341,7 +127,7 @@ def load_model(model_key: str) -> dict:
     cfg = get_model_config(model_key)
     try:
         with _gpu_lock:
-            with _cross_gpu_session(cfg, timeout=GPU_LOAD_TIMEOUT):
+            with cross_gpu_session(cfg, timeout=GPU_LOAD_TIMEOUT):
                 engine = ensure_model_engine(cfg.key)
     except HTTPException:
         raise
@@ -368,7 +154,6 @@ def load_model(model_key: str) -> dict:
 @app.post("/api/models/{model_key}/unload")
 def unload_model(model_key: str) -> dict:
     """从 GPU 卸载指定模型，释放显存。"""
-    global _active_key
     cfg = get_model_config(model_key)
     with _gpu_lock:
         if cfg.key not in _engines:
@@ -379,24 +164,24 @@ def unload_model(model_key: str) -> dict:
                 "message": "模型未在内存中",
                 "loaded": list(_engines.keys()),
             }
-        loaded, _active_key = runtime_state.unload_engine(cfg.key, _engines, _active_key)
+        loaded, new_active = runtime_state.unload_engine(cfg.key, _engines, active_key())
+        set_active_key(new_active)
     return {
         "status": "ok",
         "model_key": cfg.key,
         "unloaded": True,
         "loaded": loaded,
-        "active_model": _active_key,
+        "active_model": active_key(),
     }
 
 
 @app.post("/api/models/unload_all")
 def unload_all_models() -> dict:
     """卸载所有已加载模型。"""
-    global _active_key
     with _gpu_lock:
         count = len(_engines)
         runtime_state.unload_all_engines(_engines)
-        _active_key = None
+        set_active_key(None)
     return {"status": "ok", "unloaded_count": count, "loaded": []}
 
 
@@ -418,11 +203,11 @@ async def predict(
 ) -> dict:
     """单图推理。YOLO、LocateAnything 或 SAM3（同进程加载）。"""
     t0 = time.perf_counter()
-    fmt = _normalize_box_format(box_format)
-    mfmt = _normalize_mask_format(mask_format)
+    fmt = normalize_box_format(box_format)
+    mfmt = normalize_mask_format(mask_format)
     raw = await image.read()
     filename = getattr(image, "filename", None) or "-"
-    img = _parse_image(raw, filename)
+    img = parse_image(raw, filename)
     cfg = get_model_config(model_key)
     logger.debug(
         "predict %s | %s | %sx%s | fmt=%s",
@@ -435,7 +220,7 @@ async def predict(
 
     try:
         result = await asyncio.to_thread(
-            _run_predict_locked,
+            run_predict_locked,
             img,
             cfg,
             conf=conf,
@@ -492,11 +277,7 @@ async def predict_segment(
     sam3_points: Optional[str] = Form(None),
     sam3_boxes: Optional[str] = Form(None),
 ) -> dict:
-    """分割专用：YOLO instance segment 或 SAM3（文本/正负点/框提示）。
-
-    sam3_points JSON 示例: [{"x":120,"y":80,"label":1},{"x":200,"y":90,"label":0}]
-    label>0 正点，0 负点。可与 sam3_boxes、phrase/categories 组合。
-    """
+    """分割专用：YOLO instance segment 或 SAM3（文本/正负点/框提示）。"""
     cfg = get_model_config(model_key)
     eng = (cfg.engine or "yolo").lower()
     task_cfg = (cfg.task or "").lower()
@@ -511,10 +292,7 @@ async def predict_segment(
 
     task_eff = (task or "").strip().lower()
     if eng == "sam3" and not task_eff:
-        if sam3_points or sam3_boxes:
-            task_eff = "sam3_point"
-        else:
-            task_eff = "detect"
+        task_eff = "sam3_point" if (sam3_points or sam3_boxes) else "detect"
     elif task_cfg == "segment" and not task_eff:
         task_eff = "segment"
 
@@ -546,14 +324,10 @@ async def predict_batch(
     box_format: Optional[str] = Form("xyxy"),
     mask_format: Optional[str] = Form("polygon_norm_pct"),
 ) -> dict:
-    """批量推理。同一 model_key；单次最多 BATCH_MAX_IMAGES 张。
-
-    image_ids: JSON 数组或逗号分隔，数量须与 images 一致；省略则用 "0","1",...
-    单张失败不中断整批，该条 ok=false 并带 error。
-    """
+    """批量推理。同一 model_key；单次最多 BATCH_MAX_IMAGES 张。"""
     t0 = time.perf_counter()
-    fmt = _normalize_box_format(box_format)
-    mfmt = _normalize_mask_format(mask_format)
+    fmt = normalize_box_format(box_format)
+    mfmt = normalize_mask_format(mask_format)
     n = len(images)
     if n == 0:
         raise HTTPException(status_code=400, detail="images 不能为空")
@@ -563,7 +337,7 @@ async def predict_batch(
             detail=f"单次批量最多 {BATCH_MAX_IMAGES} 张，当前 {n}",
         )
 
-    ids = _parse_image_ids(image_ids, n)
+    ids = parse_image_ids(image_ids, n)
     cfg = get_model_config(model_key)
     if is_vlm_engine(cfg):
         raise HTTPException(
@@ -574,7 +348,7 @@ async def predict_batch(
 
     try:
         with _gpu_lock:
-            with _cross_gpu_session(cfg, timeout=GPU_LOAD_TIMEOUT):
+            with cross_gpu_session(cfg, timeout=GPU_LOAD_TIMEOUT):
                 ensure_model_engine(cfg.key)
     except HTTPException as exc:
         raise exc
@@ -590,9 +364,9 @@ async def predict_batch(
         item: Dict[str, Any] = {"image_id": image_id, "index": i, "filename": filename}
         try:
             raw = await up.read()
-            img = _parse_image(raw, filename)
+            img = parse_image(raw, filename)
             one = await asyncio.to_thread(
-                _run_predict_locked,
+                run_predict_locked,
                 img,
                 cfg,
                 conf=conf,

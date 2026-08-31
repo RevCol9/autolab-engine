@@ -43,32 +43,6 @@ def collect_train_result(save_dir: Path) -> Dict[str, Any]:
     }
 
 
-def run_detection_train(
-    param: Dict[str, Any],
-    *,
-    device: str = "0",
-    cwd: Optional[str] = None,
-) -> Dict[str, Any]:
-    """同步执行闭环检测训练（阻塞到结束）。"""
-    cmd = build_closed_loop_cmd(param, device=device)
-    save_dir = train_save_dir(str(param["projectId"]), str(param["taskId"]), str(param["trainNum"]))
-    log_path = save_dir / "train.log"
-    save_dir.mkdir(parents=True, exist_ok=True)
-    logger.info("closed_loop_train cmd: %s | log=%s", " ".join(cmd), log_path)
-    with open(log_path, "a", encoding="utf-8") as log_fp:
-        proc = subprocess.run(
-            cmd,
-            check=False,
-            cwd=cwd or "/tmp",
-            start_new_session=True,
-            stdout=log_fp,
-            stderr=subprocess.STDOUT,
-        )
-    if proc.returncode != 0:
-        raise RuntimeError(f"closed_loop_train failed, exit={proc.returncode}")
-    return collect_train_result(save_dir)
-
-
 def popen_detection_train(
     param: Dict[str, Any],
     *,

@@ -9,16 +9,7 @@
 
 from __future__ import annotations
 
-import re
 from typing import Any, Dict, List
-
-# 匹配中日韩统一表意文字，用于识别中文查询
-_CJK_RE = re.compile(r"[\u4e00-\u9fff]")
-
-
-def has_cjk(text: str) -> bool:
-    """判断文本是否包含中文等 CJK 字符。"""
-    return bool(_CJK_RE.search(text or ""))
 
 
 def enhance_user_query(text: str, bilingual: bool = True) -> str:

@@ -31,45 +31,6 @@ JOB_META_KEYS = frozenset(
     }
 )
 
-# 写入 train_config.yaml、但不传给 Ultralytics
-SCRIPT_META_KEYS = frozenset({"save_dir"})
-
-# Ultralytics model.train() 支持的常用键（其余 unknown 键也会透传）
-TRAIN_KWARG_KEYS = frozenset(
-    {
-        "epochs",
-        "batch",
-        "imgsz",
-        "device",
-        "project",
-        "name",
-        "exist_ok",
-        "save",
-        "amp",
-        "verbose",
-        "patience",
-        "workers",
-        "optimizer",
-        "lr0",
-        "lrf",
-        "momentum",
-        "weight_decay",
-        "warmup_epochs",
-        "close_mosaic",
-        "cos_lr",
-        "rect",
-        "resume",
-        "fraction",
-        "freeze",
-        "plots",
-        "val",
-        "seed",
-        "deterministic",
-        "single_cls",
-        "cache",
-    }
-)
-
 
 def _truthy(value: Any) -> bool:
     if value is True:
@@ -160,7 +121,8 @@ def write_job_train_config(param: Mapping[str, Any], *, device: str = "0") -> Pa
     return write_train_config(config, save_dir / "train_config.yaml")
 
 
-def load_train_config(path: str | Path) -> Dict[str, Any]:
+def load_job_config(path: str | Path) -> Dict[str, Any]:
+    """读取 train_config.yaml（子进程 closed_loop_train 使用）。"""
     cfg_path = Path(path)
     if not cfg_path.is_file():
         raise FileNotFoundError(f"train_config.yaml 不存在: {cfg_path}")
@@ -168,19 +130,8 @@ def load_train_config(path: str | Path) -> Dict[str, Any]:
         data = yaml.safe_load(f) or {}
     if not isinstance(data, dict):
         raise ValueError(f"train_config.yaml 格式错误: {cfg_path}")
+    required = ("model", "data", "save_dir")
+    missing = [key for key in required if not data.get(key)]
+    if missing:
+        raise ValueError(f"train_config.yaml 缺少字段: {missing}")
     return data
-
-
-def split_train_config(config: Mapping[str, Any]) -> tuple[Dict[str, Any], Dict[str, Any]]:
-    """拆分为脚本元数据与 Ultralytics train kwargs。"""
-    meta: Dict[str, Any] = {}
-    train_kwargs: Dict[str, Any] = {}
-    for key, value in config.items():
-        if key in SCRIPT_META_KEYS:
-            meta[key] = value
-        elif key in {"model", "data"}:
-            continue
-        elif key in JOB_META_KEYS:
-            continue
-        train_kwargs[key] = value
-    return meta, train_kwargs

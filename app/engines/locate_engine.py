@@ -18,6 +18,7 @@ from app.engines.box_postprocess import (
     refine_detections,
 )
 from app.engines.locate_worker import LocateAnythingWorker
+from app.engines.prompt_utils import parse_categories
 from app.settings import ModelConfig, Settings
 
 logger = logging.getLogger(__name__)
@@ -84,7 +85,7 @@ class LocateEngine(BaseEngine):
         width, height = image.size
 
         if task == "detect":
-            cats = _parse_categories(categories)
+            cats = parse_categories(categories)
             if not cats:
                 raise ValueError("categories 为空")
             result = self.worker.predict(image, build_detect_prompt(cats, bilingual), **common)
@@ -127,7 +128,7 @@ class LocateEngine(BaseEngine):
         raw_boxes = LocateAnythingWorker.parse_boxes(answer, width, height)
         points = LocateAnythingWorker.parse_points(answer, width, height)
         if task == "detect":
-            preferred_label = ",".join(_parse_categories(categories)[:3])
+            preferred_label = ",".join(parse_categories(categories)[:3])
         else:
             preferred_label = phrase.strip()
 
@@ -180,14 +181,3 @@ class LocateEngine(BaseEngine):
                 torch.cuda.empty_cache()
         except Exception as exc:
             logger.debug("locate unload empty_cache: %s", exc)
-
-
-def _parse_categories(categories: str) -> List[str]:
-    raw = str(categories or "").replace("，", ",").replace("；", ",").replace(";", ",")
-    parts: List[str] = []
-    for chunk in raw.split(","):
-        for line in chunk.splitlines():
-            item = line.strip()
-            if item:
-                parts.append(item)
-    return parts

@@ -8,7 +8,7 @@ from typing import Any, Dict, List, Optional
 from PIL import Image
 
 from app.engines.base import BaseEngine
-from app.engines.locate_engine import _parse_categories
+from app.engines.prompt_utils import parse_categories
 from app.engines.sam3_worker import Sam3Worker, parse_boxes, parse_points
 from app.mask_format import SUPPORTED_MASK_FORMATS
 from app.settings import ModelConfig, Settings
@@ -75,17 +75,17 @@ class Sam3Engine(BaseEngine):
         if task in ("sam3_point", "point", "interactive"):
             if not points and not prompt_boxes:
                 raise ValueError("sam3_point 需要 sam3_points 和/或 sam3_boxes")
-            cats = _parse_categories(categories)
+            cats = parse_categories(categories)
             prompt = phrase.strip() or (cats[0] if cats else "")
             prompts = [prompt]
         elif task == "sam3_text":
-            cats = _parse_categories(categories)
+            cats = parse_categories(categories)
             prompt = phrase.strip() or (cats[0] if cats else "")
             if not prompt and not points and not prompt_boxes:
                 raise ValueError("SAM3 prompt 为空")
             prompts = [prompt]
         elif task == "detect":
-            cats = _parse_categories(categories)
+            cats = parse_categories(categories)
             if phrase.strip():
                 prompts = [phrase.strip()]
             elif cats:
