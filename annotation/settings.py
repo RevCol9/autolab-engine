@@ -114,7 +114,6 @@ class Settings:
     postprocess_min_box_area_ratio: float = 0.0003
     postprocess_max_box_area_ratio: float = 0.85
     postprocess_max_boxes: int = 32
-    bilingual_prompt: bool = True
 
 
 def resolve_config_path(explicit: Optional[str] = None) -> Path:
@@ -220,7 +219,6 @@ def load_settings(config_path: Optional[str] = None) -> Settings:
             _dig(data, "postprocess", "max_box_area_ratio", default=0.85)
         ),
         postprocess_max_boxes=int(_dig(data, "postprocess", "max_boxes", default=32)),
-        bilingual_prompt=_as_bool(_dig(data, "postprocess", "bilingual_prompt", default=True), True),
     )
 
 

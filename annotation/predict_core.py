@@ -1,4 +1,10 @@
-"""推理核心：单图预测、格式归一化、批量 ID 解析。"""
+"""推理核心：单图预测、格式归一化、批量 ID 解析。
+
+HTTP 层（api/inference.py）负责读图与参数校验；本模块负责：
+  1. run_predict_locked：线程锁 + GPU 文件锁后调用引擎
+  2. run_predict_unlocked：按 engine 分发 YOLO / VLM，统一 box/mask 坐标格式
+  3. parse_image / parse_image_ids：multipart 输入解析
+"""
 
 from __future__ import annotations
 

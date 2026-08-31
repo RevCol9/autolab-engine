@@ -21,11 +21,6 @@ logger = logging.getLogger(__name__)
 
 _DEVICE_INDEX_RE = re.compile(r"(?:cuda:)?(\d+)$", re.IGNORECASE)
 
-
-class GpuBusyError(RuntimeError):
-    """无法在超时内获取 GPU 排他锁。"""
-
-
 def parse_device_index(device: str) -> str:
     """从 ``cuda:0`` / ``0`` 解析 GPU 索引字符串。"""
     text = (device or "0").strip()
@@ -109,11 +104,3 @@ class GpuDeviceLock:
                 return True
         finally:
             os.close(fd)
-
-    def __enter__(self) -> GpuDeviceLock:
-        if not self.acquire(blocking=True, timeout=120.0):
-            raise GpuBusyError(f"GPU {self.device_index} 忙，超时未获取锁")
-        return self
-
-    def __exit__(self, *args: object) -> None:
-        self.release()

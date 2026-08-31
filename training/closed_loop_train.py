@@ -1,7 +1,12 @@
 #!/usr/bin/env python3
-"""Closed-loop training via ultralytics 8.3+ (supports YOLO11 baseline PT).
+"""Ultralytics 闭环训练子进程（由 trainer.popen_detection_train 启动）。
 
-由 training.trainer 通过 NIII_YOLO_PYTHON 子进程调用；产出 trainning_data.csv / report.json。
+算法步骤：
+  1. 读取 save_dir/train_config.yaml（hparams.write_job_train_config 生成）
+  2. baseline_eval：训练前在验证集上评估起始权重
+  3. model.train：每 epoch 回调写 trainning_data.csv（loss/mAP/资源占用）
+  4. trained_eval：对 weights/best.pt 再评估
+  5. 汇总 report.json（起止时间、指标对比、资源峰值）
 """
 from __future__ import annotations
 

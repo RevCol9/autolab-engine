@@ -71,7 +71,6 @@ class LocateEngine(BaseEngine):
             else self.settings.temperature
         )
         verbose = bool(kwargs.get("verbose", False))
-        bilingual = self.settings.bilingual_prompt
 
         common = {
             "generation_mode": generation_mode,
@@ -88,18 +87,18 @@ class LocateEngine(BaseEngine):
             cats = parse_categories(categories)
             if not cats:
                 raise ValueError("categories 为空")
-            result = self.worker.predict(image, build_detect_prompt(cats, bilingual), **common)
+            result = self.worker.predict(image, build_detect_prompt(cats), **common)
         elif task == "ground_multi":
             if not phrase.strip():
                 raise ValueError("phrase 为空")
             result = self.worker.predict(
-                image, build_ground_multi_prompt(phrase.strip(), bilingual), **common
+                image, build_ground_multi_prompt(phrase.strip()), **common
             )
         elif task == "ground_single":
             if not phrase.strip():
                 raise ValueError("phrase 为空")
             result = self.worker.predict(
-                image, build_ground_single_prompt(phrase.strip(), bilingual), **common
+                image, build_ground_single_prompt(phrase.strip()), **common
             )
         elif task == "detect_text":
             result = self.worker.predict(image, "Detect all the text in box format.", **common)
@@ -107,20 +106,20 @@ class LocateEngine(BaseEngine):
             if not phrase.strip():
                 raise ValueError("phrase 为空")
             result = self.worker.predict(
-                image, build_ground_text_prompt(phrase.strip(), bilingual), **common
+                image, build_ground_text_prompt(phrase.strip()), **common
             )
         elif task == "ground_gui":
             if not phrase.strip():
                 raise ValueError("phrase 为空")
             result = self.worker.predict(
                 image,
-                build_ground_gui_prompt(phrase.strip(), output_type=output_type, bilingual=bilingual),
+                build_ground_gui_prompt(phrase.strip(), output_type=output_type),
                 **common,
             )
         elif task == "point":
             if not phrase.strip():
                 raise ValueError("phrase 为空")
-            result = self.worker.predict(image, build_point_prompt(phrase.strip(), bilingual), **common)
+            result = self.worker.predict(image, build_point_prompt(phrase.strip()), **common)
         else:
             raise ValueError(f"不支持的 task: {task}")
 

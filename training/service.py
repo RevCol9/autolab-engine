@@ -1,4 +1,12 @@
-"""训练任务管理：单任务 start/stop，跨进程 GPU 锁与进度快照。"""
+"""训练任务管理：单槽 JobManager + 跨进程 GPU 锁。
+
+流程：
+  api/train.py POST start → MANAGER.start
+    → 非阻塞获取 GpuDeviceLock（与推理争用同索引时 409）
+    → trainer.popen_detection_train 写 train_config.yaml 并 Popen 子进程
+    → 后台线程 wait，结束后 collect_train_result 校验 best.pt
+  POST stop → kill 进程组并释放 GPU 锁
+"""
 
 from __future__ import annotations
 
@@ -123,7 +131,7 @@ class JobManager:
         job._gpu_lock = gpu_lock
 
         try:
-            proc = popen_detection_train(param, device=device)
+            proc = popen_detection_train(param, device=job.device)
         except Exception as exc:
             self._release_gpu_lock(job)
             with self._lock:

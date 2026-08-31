@@ -12,54 +12,50 @@ from __future__ import annotations
 from typing import Any, Dict, List
 
 
-def enhance_user_query(text: str, bilingual: bool = True) -> str:
-    """整理用户查询文本。
-
-    中文原样保留，不做自动翻译，避免改客户语义。
-    bilingual 预留扩展（例如后续接词典/翻译），当前仅做 strip。
-    """
+def enhance_user_query(text: str) -> str:
+    """整理用户查询文本；中文原样保留，仅 strip。"""
     return (text or "").strip()
 
 
-def build_detect_prompt(categories: List[str], bilingual: bool = True) -> str:
+def build_detect_prompt(categories: List[str]) -> str:
     """构造开放词汇检测提示词（类别列表）。
 
     注意：description 槽位只能放类别本身，不要附加英文说明，
     否则模型会把整段英文写进 <ref> 标签，前端标签条会铺满画面。
     """
-    cats = "</c>".join(enhance_user_query(c, bilingual) for c in categories if c.strip())
+    cats = "</c>".join(enhance_user_query(c) for c in categories if c.strip())
     return f"Locate all the instances that matches the following description: {cats}."
 
 
-def build_ground_multi_prompt(phrase: str, bilingual: bool = True) -> str:
+def build_ground_multi_prompt(phrase: str) -> str:
     """构造短语多实例定位提示词。description 仅放用户原短语（可中文）。"""
-    phrase = enhance_user_query(phrase, bilingual)
+    phrase = enhance_user_query(phrase)
     return f"Locate all the instances that match the following description: {phrase}."
 
 
-def build_ground_single_prompt(phrase: str, bilingual: bool = True) -> str:
+def build_ground_single_prompt(phrase: str) -> str:
     """构造短语单实例定位提示词。description 仅放用户原短语（可中文）。"""
-    phrase = enhance_user_query(phrase, bilingual)
+    phrase = enhance_user_query(phrase)
     return f"Locate a single instance that matches the following description: {phrase}."
 
 
-def build_ground_text_prompt(phrase: str, bilingual: bool = True) -> str:
+def build_ground_text_prompt(phrase: str) -> str:
     """构造文本定位提示词。"""
-    phrase = enhance_user_query(phrase, bilingual)
+    phrase = enhance_user_query(phrase)
     return f"Please locate the text referred as {phrase}."
 
 
-def build_ground_gui_prompt(phrase: str, output_type: str = "box", bilingual: bool = True) -> str:
+def build_ground_gui_prompt(phrase: str, output_type: str = "box") -> str:
     """构造 GUI 定位提示词；output_type=point 时改为指点。"""
-    phrase = enhance_user_query(phrase, bilingual)
+    phrase = enhance_user_query(phrase)
     if output_type == "point":
         return f"Point to: {phrase}."
     return f"Locate the region that matches the following description: {phrase}."
 
 
-def build_point_prompt(phrase: str, bilingual: bool = True) -> str:
+def build_point_prompt(phrase: str) -> str:
     """构造点定位提示词。"""
-    phrase = enhance_user_query(phrase, bilingual)
+    phrase = enhance_user_query(phrase)
     return f"Point to: {phrase}."
 
 

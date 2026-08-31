@@ -1,4 +1,10 @@
-"""训练超参：config.yaml + API JSON → Ultralytics train_config.yaml。"""
+"""训练超参：training/config.yaml + API JSON → 任务级 train_config.yaml。
+
+合并顺序：
+  1. training/config.yaml 中的 Ultralytics 默认项
+  2. 平台 POST JSON（字段名经 API_FIELD_ALIASES 映射）
+  3. 代码写入 model / data / save_dir / device（device 默认来自 config）
+"""
 
 from __future__ import annotations
 
@@ -57,7 +63,7 @@ def resolve_model_path(param: Mapping[str, Any]) -> str:
     return text
 
 
-def load_train_defaults() -> Dict[str, Any]:
+def load_training_defaults() -> Dict[str, Any]:
     """从 training/config.yaml 读取 Ultralytics 默认超参。"""
     defaults = training_ultralytics_defaults()
     if not defaults:
@@ -92,7 +98,7 @@ def build_job_train_config(
     save_path = train_save_dir(project_id, task_id, train_num)
     save_path.mkdir(parents=True, exist_ok=True)
 
-    config: Dict[str, Any] = load_train_defaults()
+    config: Dict[str, Any] = load_training_defaults()
     config.update(normalize_api_param(param))
     config.update(
         {

@@ -1,4 +1,8 @@
-"""检测闭环训练调度。"""
+"""检测闭环训练调度：写 train_config.yaml 并 Popen closed_loop_train 子进程。
+
+子进程入口：training/closed_loop_train.py（由 NIII_YOLO_PYTHON 执行）
+产出目录：{STORAGE_ROOT}/.../train{N}/ 下的 train.log、trainning_data.csv、report.json、weights/best.pt
+"""
 
 from __future__ import annotations
 
