@@ -1,7 +1,8 @@
 """训练 HTTP API（:21011，端口见 config/training/base.yaml）。
 
 POST .../train/detection | .../train/segmentation：action=start|stop
-GET /api/train/status、/api/train/progress
+POST .../dataset/clean：数据清洗（训练前）
+GET /api/train/status、/api/train/progress、/api/dataset/clean/defaults
 """
 
 from __future__ import annotations
@@ -14,6 +15,7 @@ from typing import Any, Dict, Literal, Optional
 from fastapi import FastAPI, HTTPException, Query
 from pydantic import BaseModel, Field
 
+from training.data_clean_service import run_storage_data_clean
 from training.registry import registered_tasks
 from training.settings import default_training_device, resolve_training_device
 from shared.gpu_lock import GpuDeviceLock, parse_device_index
@@ -51,6 +53,32 @@ class TrainJobBody(BaseModel):
 
 # 兼容旧 schema 名
 TrainDetectionBody = TrainJobBody
+
+
+class DataCleanThresholds(BaseModel):
+    dark_brightness_lt: Optional[float] = Field(None, description="过暗：brightness 低于此值剔除")
+    odd_aspect_ratio_lt: Optional[float] = Field(None, description="异常宽高比")
+    low_information_entropy_lt: Optional[float] = Field(None, description="低信息量：entropy 低于此值剔除")
+    blurry_blurriness_lt: Optional[float] = Field(None, description="模糊：blurriness 低于此值剔除")
+    odd_size_lt: Optional[float] = Field(None, description="异常尺寸：size 低于此值剔除")
+
+
+class DataCleanBody(BaseModel):
+    projectId: str = Field(..., description="与训练一致，如 algorithms")
+    taskId: str = Field(..., description="任务 ID，如 Helmet")
+    trainNum: str = Field(..., description="训练批次目录名，如 train1")
+    outputName: Optional[str] = Field("clean_output", description="输出子目录名，位于 trainNum 下")
+    overwrite: Optional[bool] = Field(True, description="是否覆盖已有 clean_output")
+    skipCleanvision: Optional[bool] = Field(False, description="true 时跳过全部图像质量过滤，仅做标签校验与导出")
+    requireCleanvision: Optional[bool] = Field(False, description="true 且未安装 cleanvision 时返回 400")
+    enabledFilters: Optional[list[str]] = Field(
+        None,
+        description="启用的过滤器；不传则全部启用。可选: dark, odd_aspect_ratio, low_information, blurry, odd_size, near_duplicates, exact_duplicates, missing_label",
+    )
+    thresholds: Optional[DataCleanThresholds] = Field(
+        None,
+        description="各过滤器阈值；未传字段使用算法默认值",
+    )
 
 
 def _probe_ultralytics() -> Dict[str, Any]:
@@ -195,3 +223,53 @@ def train_detection(endpoint_name: str, body: TrainJobBody) -> Dict[str, Any]:
 def train_segmentation(endpoint_name: str, body: TrainJobBody) -> Dict[str, Any]:
     _assert_yolo_detector(endpoint_name)
     return _run_train_job(body, task="segmentation")
+
+
+@app.get("/api/dataset/clean/defaults")
+def dataset_clean_defaults() -> Dict[str, Any]:
+    """返回前端可展示的默认阈值与可选过滤器列表。"""
+    from toolkit.data_clean.config import DEFAULT_THRESHOLDS, FILTER_NAMES
+
+    return {
+        "filters": list(FILTER_NAMES),
+        "defaultEnabledFilters": list(FILTER_NAMES),
+        "defaultThresholds": DEFAULT_THRESHOLDS,
+    }
+
+
+@app.post("/api/v1/{endpoint_name}/dataset/clean")
+def dataset_clean(endpoint_name: str, body: DataCleanBody) -> Dict[str, Any]:
+    """
+    对 storage 下 ``{projectId}/{taskId}/{trainNum}/`` 执行数据清洗。
+
+    前端配置参数 → Java 原样转发 → 本接口执行 → 返回摘要；明细 CSV 写在 outputRoot 下。
+    """
+    _assert_yolo_detector(endpoint_name)
+
+    thresholds = None
+    if body.thresholds is not None:
+        thresholds = {
+            k: v
+            for k, v in body.thresholds.model_dump(exclude_none=True).items()
+            if v is not None
+        }
+
+    try:
+        return run_storage_data_clean(
+            body.projectId,
+            body.taskId,
+            body.trainNum,
+            outputName=body.outputName,
+            overwrite=body.overwrite,
+            skipCleanvision=body.skipCleanvision,
+            requireCleanvision=body.requireCleanvision,
+            enabledFilters=body.enabledFilters,
+            thresholds=thresholds,
+        )
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.exception("dataset clean failed")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
