@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Dict, List, Optional
 
-from toolkit.data_clean.config import DataCleanConfig, DEFAULT_THRESHOLDS, FILTER_NAMES
+from toolkit.data_clean.config import DataCleanConfig
 from toolkit.data_clean.discovery import (
     collect_image_index,
     collect_label_candidates,
@@ -134,17 +134,17 @@ def run_data_clean(
 ) -> DataCleanResult:
     """嵌入入口：清洗数据集并导出 ``images/`` + ``labels/``。"""
     cfg = config or DataCleanConfig()
+    overrides = {}
     if output_name is not None:
-        cfg.output_name = output_name
+        overrides["output_name"] = output_name
     if skip_cleanvision is not None:
-        cfg.skip_cleanvision = skip_cleanvision
+        overrides["skip_cleanvision"] = skip_cleanvision
+    if overrides:
+        cfg = replace(cfg, **overrides)
     return DataCleaner(cfg).run(data_root)
 
 
 __all__ = [
-    "DEFAULT_THRESHOLDS",
-    "FILTER_NAMES",
-    "DataCleanConfig",
     "DataCleanResult",
     "DataCleaner",
     "run_data_clean",

@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
 
 from toolkit.data_clean.config import DataCleanConfig
-from toolkit.data_clean.paths import image_base_key, is_under, normalize_rel
+from toolkit.data_clean.paths import is_under, normalize_rel
 
 LabelCandidate = Tuple[int, int, str, Path]
 
@@ -114,18 +114,16 @@ def resolve_image_key(
     image_dir: Path,
     config: DataCleanConfig,
 ) -> Optional[str]:
+    """将 CleanVision 返回的路径名映射到 ``image_index`` 的相对 key。"""
     raw = str(name)
     candidates: List[str] = []
 
-    try:
-        path = Path(raw)
-        if path.is_absolute():
-            try:
-                candidates.append(normalize_rel(path.resolve().relative_to(image_dir.resolve())))
-            except ValueError:
-                pass
-    except Exception:
-        pass
+    path = Path(raw)
+    if path.is_absolute():
+        try:
+            candidates.append(normalize_rel(path.resolve().relative_to(image_dir.resolve())))
+        except ValueError:
+            pass
 
     text = raw.replace("\\", "/")
     for dirname in config.image_dir_candidates:
@@ -137,11 +135,22 @@ def resolve_image_key(
             candidates.append(text[len(prefix) :])
     candidates.append(text)
 
+    seen: set[str] = set()
     for candidate in candidates:
         try:
             key = normalize_rel(candidate)
         except ValueError:
             continue
+        if key in seen:
+            continue
+        seen.add(key)
         if key in image_index:
             return key
+
+    # CleanVision 有时只给文件名；仅当 basename 在索引中唯一时才匹配
+    basename = Path(text).name
+    if basename:
+        matches = [key for key in image_index if Path(key).name == basename]
+        if len(matches) == 1:
+            return matches[0]
     return None

@@ -77,6 +77,15 @@ def write_csv(path: Path, fieldnames: Sequence[str], rows: Sequence[dict]) -> No
         writer.writerows(rows)
 
 
+def write_empty_label(dst_root: Path, rel_key: str) -> Path:
+    dst = dst_root / Path(rel_key)
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    if dst.exists():
+        raise FileExistsError(f"Destination already exists: {dst}")
+    dst.write_text("", encoding="utf-8")
+    return dst
+
+
 def export_dataset(
     active_keys: Set[str],
     removal_reasons: Dict[str, List[str]],
@@ -99,13 +108,19 @@ def export_dataset(
         image_src = image_index[image_key]
         base = image_base_key(image_key)
         label_items = label_candidates.get(base)
-        if not label_items:
-            raise RuntimeError(f"Internal error: kept image has no label: {image_key}")
+        if label_items:
+            label_src: Path | None = label_items[0][3]
+            label_suffix = label_src.suffix
+            label_source_repr = str(label_src)
+        else:
+            # missing_label 关闭时允许保留无标注图，写空 YOLO txt 作为负样本
+            label_src = None
+            label_suffix = ".txt"
+            label_source_repr = ""
 
-        label_src = label_items[0][3]
         image_rel, label_rel, renamed = unique_pair_rel(
             image_key,
-            label_src.suffix,
+            label_suffix,
             used_images,
             used_labels,
         )
@@ -113,7 +128,10 @@ def export_dataset(
             collision_renamed += 1
 
         image_dst = copy_to_relative(image_src, image_out, image_rel)
-        label_dst = copy_to_relative(label_src, label_out, label_rel)
+        if label_src is None:
+            label_dst = write_empty_label(label_out, label_rel)
+        else:
+            label_dst = copy_to_relative(label_src, label_out, label_rel)
         used_images.add(image_rel)
         used_labels.add(label_rel)
         manifest_rows.append(
@@ -122,7 +140,7 @@ def export_dataset(
                 "output_image_rel_path": image_rel,
                 "output_label_rel_path": label_rel,
                 "image_source": str(image_src),
-                "label_source": str(label_src),
+                "label_source": label_source_repr,
                 "image_output": str(image_dst),
                 "label_output": str(label_dst),
                 "renamed_for_collision": str(renamed),

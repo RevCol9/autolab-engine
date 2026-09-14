@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-from collections import defaultdict
 from pathlib import Path
 from typing import Dict, Iterable, List, Sequence, Set
 
 from toolkit.data_clean.config import DataCleanConfig
 from toolkit.data_clean.discovery import LabelCandidate, resolve_image_key
+from toolkit.data_clean.paths import image_base_key
 
 
 def add_reason(removal_reasons: Dict[str, List[str]], key: str, reason: str) -> None:
@@ -71,12 +71,13 @@ def remove_from_cleanvision_index(
 
 def get_duplicate_sets(imagelab, issue_name: str) -> Sequence[Sequence[object]]:
     issue = imagelab.info.get(issue_name)
-    if not issue:
+    if issue is None:
         return []
     if isinstance(issue, dict):
         return issue.get("sets", []) or []
     try:
-        return issue["sets"] or []
+        sets = issue["sets"]
+        return list(sets) if sets is not None else []
     except Exception:
         return []
 
@@ -198,18 +199,13 @@ def validate_labels(
     label_candidates: Dict[str, List[LabelCandidate]],
     config: DataCleanConfig,
 ) -> None:
+    """缺标签剔除；多候选标签已在 discovery 中按优先级排序，导出取第一项。"""
     if not config.is_filter_enabled("missing_label"):
         return
-    from toolkit.data_clean.paths import image_base_key
 
-    missing = []
-    ambiguous = []
-    for key in sorted(active_keys):
-        base = image_base_key(key)
-        if base not in label_candidates:
-            missing.append(key)
-        elif len(label_candidates[base]) > 1:
-            ambiguous.append(key)
+    missing = [
+        key
+        for key in sorted(active_keys)
+        if image_base_key(key) not in label_candidates
+    ]
     remove_keys(active_keys, removal_reasons, missing, "missing_label")
-    if ambiguous:
-        print(f"Multiple label candidates: {len(ambiguous)}, examples={ambiguous[:5]}")

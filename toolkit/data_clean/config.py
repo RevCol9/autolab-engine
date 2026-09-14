@@ -52,11 +52,6 @@ class DataCleanConfig:
     label_exts: frozenset[str] = LABEL_EXTS
     label_ext_priority: tuple[str, ...] = LABEL_EXT_PRIORITY
 
-    @classmethod
-    def autolab_storage(cls, output_name: str = "clean_output") -> DataCleanConfig:
-        """autolab storage 常见布局：train{N}/images + train{N}/labels。"""
-        return cls(output_name=output_name)
-
     def is_filter_enabled(self, name: str) -> bool:
         enabled = self.enabled_filters if self.enabled_filters is not None else DEFAULT_ENABLED_FILTERS
         return name in enabled
