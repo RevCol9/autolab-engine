@@ -50,7 +50,7 @@ class CythonBuilder:
     def _is_py_file(self, path: Path) -> bool:
         return path.is_file() and path.suffix == ".py"
 
-    def _should_skip_path(self, path: Path) -> bool:
+    def should_skip_path(self, path: Path) -> bool:
         return bool(set(path.parts) & self.config.skip_dirs)
 
     def _collect_py_files(
@@ -76,7 +76,7 @@ class CythonBuilder:
         result: list[Path] = []
         walker = target.rglob("*.py") if recursive else target.glob("*.py")
         for py_path in sorted(walker):
-            if self._should_skip_path(py_path):
+            if self.should_skip_path(py_path):
                 continue
             if py_path.name in self.config.never_compile:
                 continue
@@ -140,31 +140,34 @@ class CythonBuilder:
         from Cython.Build import cythonize
 
         out_root.mkdir(parents=True, exist_ok=True)
+        prev_cwd = Path.cwd()
         os.chdir(self.project_root)
+        try:
+            extensions = [
+                Extension(
+                    self.py_to_module_name(rel_py),
+                    [str(rel_py).replace("\\", "/")],
+                )
+                for rel_py in py_files
+            ]
 
-        extensions = [
-            Extension(
-                self.py_to_module_name(rel_py),
-                [str(rel_py).replace("\\", "/")],
+            print(f"\n开始编译 {len(extensions)} 个文件 -> {out_root}\n")
+            for rel_py in py_files:
+                print(f"  - {rel_py}")
+
+            setup(
+                script_args=["build_ext", f"--build-lib={out_root}"],
+                ext_modules=cythonize(
+                    extensions,
+                    compiler_directives={
+                        "language_level": "3",
+                        "annotation_typing": False,
+                    },
+                    quiet=False,
+                ),
             )
-            for rel_py in py_files
-        ]
-
-        print(f"\n开始编译 {len(extensions)} 个文件 -> {out_root}\n")
-        for rel_py in py_files:
-            print(f"  - {rel_py}")
-
-        setup(
-            script_args=["build_ext", f"--build-lib={out_root}"],
-            ext_modules=cythonize(
-                extensions,
-                compiler_directives={
-                    "language_level": "3",
-                    "annotation_typing": False,
-                },
-                quiet=False,
-            ),
-        )
+        finally:
+            os.chdir(prev_cwd)
 
     @staticmethod
     def find_extension_files(rel_py: Path, root: Path) -> list[Path]:
@@ -182,25 +185,29 @@ class CythonBuilder:
         return sorted(found)
 
     def verify_imports(self, py_files: list[Path], out_root: Path) -> bool:
+        prev_cwd = Path.cwd()
         os.chdir(out_root)
         if str(out_root) not in sys.path:
             sys.path.insert(0, str(out_root))
 
         ok = True
         print(f"\n验证 develop import ({out_root.name}):\n")
-        for rel_py in py_files:
-            if rel_py.stem in self.config.verify_skip_suffixes:
-                continue
-            mod = self.py_to_module_name(rel_py)
-            try:
-                if mod in sys.modules:
-                    del sys.modules[mod]
-                m = importlib.import_module(mod)
-                print(f"  OK  {mod}")
-                print(f"      -> {getattr(m, '__file__', '?')}")
-            except Exception as e:
-                ok = False
-                print(f"  FAIL {mod}: {e}")
+        try:
+            for rel_py in py_files:
+                if rel_py.stem in self.config.verify_skip_suffixes:
+                    continue
+                mod = self.py_to_module_name(rel_py)
+                try:
+                    if mod in sys.modules:
+                        del sys.modules[mod]
+                    m = importlib.import_module(mod)
+                    print(f"  OK  {mod}")
+                    print(f"      -> {getattr(m, '__file__', '?')}")
+                except Exception as e:
+                    ok = False
+                    print(f"  FAIL {mod}: {e}")
+        finally:
+            os.chdir(prev_cwd)
         return ok
 
     def print_summary(self, py_files: list[Path], out_root: Path, platform: str) -> None:

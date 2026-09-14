@@ -59,7 +59,7 @@ def sync_develop(config: CythonBuildConfig, platform: str) -> None:
     if config.include_init_on_sync:
         builder = CythonBuilder(config)
         for init_py in root.rglob("__init__.py"):
-            if builder._should_skip_path(init_py):
+            if builder.should_skip_path(init_py):
                 continue
             rel = init_py.relative_to(root)
             _copy_file(init_py, out_root / rel)

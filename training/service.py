@@ -84,6 +84,8 @@ class JobManager:
         if code is None:
             return
         self._complete_job(job, code)
+        # 进程已退出时立即释锁，避免 wait 线程尚未跑完导致新任务误判 GPU 占用
+        self._release_gpu_lock(job)
 
     def _is_busy_locked(self) -> bool:
         self._reap_if_exited()

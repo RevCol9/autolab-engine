@@ -70,7 +70,7 @@ def main(argv: list[str] | None = None) -> None:
         print("  python -m toolkit.cython_build --all --platform linux")
         sys.exit(1)
 
-    py_files = builder.build(
+    builder.build(
         raw_targets,
         platform=platform,
         verify=args.verify,
@@ -88,8 +88,6 @@ def main(argv: list[str] | None = None) -> None:
     print(f"启动: python {entry}")
     if platform == "windows":
         print("Linux 包需在 Linux 上再执行: python -m toolkit.cython_build --all --platform linux")
-
-    return py_files
 
 
 if __name__ == "__main__":

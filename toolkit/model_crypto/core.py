@@ -82,6 +82,21 @@ def _resolve_key_dir(
     )
 
 
+def _validate_aes_materials(key: bytes, nonce: bytes) -> None:
+    if len(key) != 32:
+        raise ValueError(f"AES key 长度必须为 32 字节，当前为 {len(key)}")
+    if len(nonce) != 16:
+        raise ValueError(f"AES-CTR nonce 长度必须为 16 字节，当前为 {len(nonce)}")
+
+
+def _ctr_crypt(key: bytes, nonce: bytes, payload: bytes) -> bytes:
+    _validate_aes_materials(key, nonce)
+    cipher = Cipher(algorithms.AES(key), modes.CTR(nonce), backend=default_backend())
+    # CTR 加解密同一套 update；禁止跨张量复用同一 nonce。
+    cryptor = cipher.encryptor()
+    return cryptor.update(payload) + cryptor.finalize()
+
+
 class _AESEncryptor:
     def __init__(
         self,
@@ -98,19 +113,20 @@ class _AESEncryptor:
         if reuse_existing and key_file.is_file() and nonce_file.is_file():
             self.key = key_file.read_bytes()
             self.nonce = nonce_file.read_bytes()
+            _validate_aes_materials(self.key, self.nonce)
             return
         self.key = secrets.token_bytes(32)
         self.nonce = secrets.token_bytes(16)
         key_file.write_bytes(self.key)
         nonce_file.write_bytes(self.nonce)
 
-    def encrypt_tensor(self, tensor: torch.Tensor) -> torch.Tensor:
-        cipher = Cipher(algorithms.AES(self.key), modes.CTR(self.nonce), backend=default_backend())
-        encryptor = cipher.encryptor()
+    def encrypt_tensor(self, tensor: torch.Tensor) -> tuple[torch.Tensor, bytes]:
+        """加密单个张量，返回 (密文, 本张量专用 nonce)。"""
+        nonce = secrets.token_bytes(16)
         arr = tensor.detach().cpu().float().numpy()
-        encrypted = encryptor.update(arr.tobytes()) + encryptor.finalize()
+        encrypted = _ctr_crypt(self.key, nonce, arr.tobytes())
         out = np.frombuffer(encrypted, dtype=np.float32)
-        return torch.from_numpy(out.copy()).view(tensor.shape)
+        return torch.from_numpy(out.copy()).view(tensor.shape), nonce
 
 
 class _AESDecryptor:
@@ -118,12 +134,19 @@ class _AESDecryptor:
         key_dir = Path(key_dir)
         self.key = (key_dir / config.key_file_name).read_bytes()
         self.nonce = (key_dir / config.nonce_file_name).read_bytes()
+        _validate_aes_materials(self.key, self.nonce)
 
-    def decrypt_tensor(self, encrypted: torch.Tensor, dtype: torch.dtype) -> torch.Tensor:
-        cipher = Cipher(algorithms.AES(self.key), modes.CTR(self.nonce), backend=default_backend())
-        decryptor = cipher.decryptor()
+    def decrypt_tensor(
+        self,
+        encrypted: torch.Tensor,
+        dtype: torch.dtype,
+        *,
+        nonce: bytes | None = None,
+    ) -> torch.Tensor:
+        # 新格式：每张量独立 nonce；旧格式回退到密钥目录中的全局 nonce。
+        use_nonce = self.nonce if nonce is None else nonce
         arr = encrypted.detach().cpu().float().numpy()
-        decrypted = decryptor.update(arr.tobytes()) + decryptor.finalize()
+        decrypted = _ctr_crypt(self.key, use_nonce, arr.tobytes())
         out = np.frombuffer(decrypted, dtype=np.float32)
         return torch.from_numpy(out.copy()).view(encrypted.shape).to(dtype)
 
@@ -171,10 +194,14 @@ class ModelDecryptor:
         checkpoint: dict[str, Any] | None = None,
     ) -> dict[str, torch.Tensor]:
         checkpoint = checkpoint or self.read_encrypted_checkpoint(encrypted_path)
+        dtype_meta = checkpoint["dtype_metadata"]
+        nonce_meta = checkpoint.get("nonce_metadata") or {}
         state_dict: dict[str, torch.Tensor] = {}
         for name, enc_tensor in checkpoint["encrypted_state_dict"].items():
-            dtype = getattr(torch, checkpoint["dtype_metadata"][name].replace("torch.", ""))
-            state_dict[name] = self._decryptor.decrypt_tensor(enc_tensor, dtype)
+            dtype = getattr(torch, dtype_meta[name].replace("torch.", ""))
+            raw_nonce = nonce_meta.get(name)
+            nonce = bytes(raw_nonce) if raw_nonce is not None else None
+            state_dict[name] = self._decryptor.decrypt_tensor(enc_tensor, dtype, nonce=nonce)
         return state_dict
 
     def build_yolo(
@@ -248,12 +275,13 @@ def encrypt_weights(
 
     encrypted_sd: dict[str, torch.Tensor] = {}
     dtype_meta: dict[str, str] = {}
+    nonce_meta: dict[str, bytes] = {}
     state_dict = model.state_dict()
     total = len(state_dict)
 
     for i, (name, tensor) in enumerate(state_dict.items(), start=1):
         dtype_meta[name] = str(tensor.dtype)
-        encrypted_sd[name] = encryptor.encrypt_tensor(tensor)
+        encrypted_sd[name], nonce_meta[name] = encryptor.encrypt_tensor(tensor)
         if i % 100 == 0 or i == total:
             print(f"  加密进度: {i}/{total}")
 
@@ -261,9 +289,12 @@ def encrypt_weights(
     out[cfg.encrypted_mark] = True
     out["encrypted_state_dict"] = encrypted_sd
     out["dtype_metadata"] = dtype_meta
+    out["nonce_metadata"] = nonce_meta
     out["model_yaml"] = model.yaml
     out["model_names"] = dict(model.names)
+    # 去掉明文权重，避免密文旁仍残留 model/ema
     out.pop("model", None)
+    out.pop("ema", None)
 
     dst_pt.parent.mkdir(parents=True, exist_ok=True)
     torch.save(out, dst_pt)
@@ -281,13 +312,20 @@ def discover_yolo_weights(
     root = Path(root).resolve()
     excludes = set(exclude_dirs or cfg.default_exclude_dirs)
     results: list[Path] = []
-    for path in sorted(root.rglob("*.pt")):
-        if any(part in excludes for part in path.parts):
-            continue
-        if path.stem.endswith(cfg.enc_suffix):
-            continue
-        if is_yolo_checkpoint(path, config=cfg):
-            results.append(path)
+    seen: set[Path] = set()
+    for suffix in sorted(cfg.weight_suffixes):
+        for path in sorted(root.rglob(f"*{suffix}")):
+            if path in seen:
+                continue
+            if any(part in excludes for part in path.parts):
+                continue
+            if path.suffix.lower() != suffix.lower():
+                continue
+            if path.stem.endswith(cfg.enc_suffix):
+                continue
+            if is_yolo_checkpoint(path, config=cfg):
+                seen.add(path)
+                results.append(path)
     return results
 
 
@@ -369,13 +407,18 @@ def decrypt_to_pt(
         os.unlink(yaml_path)
 
     out = copy.deepcopy(checkpoint)
-    for key in (cfg.encrypted_mark, "encrypted_state_dict", "dtype_metadata", "model_yaml", "model_names"):
+    for key in (
+        cfg.encrypted_mark,
+        "encrypted_state_dict",
+        "dtype_metadata",
+        "nonce_metadata",
+        "model_yaml",
+        "model_names",
+    ):
         out.pop(key, None)
 
-    if "model" not in out and "ema" in out:
-        out["ema"] = restored
-    else:
-        out["model"] = restored
+    out["model"] = restored
+    out.pop("ema", None)
 
     dst_pt.parent.mkdir(parents=True, exist_ok=True)
     torch.save(out, dst_pt)
