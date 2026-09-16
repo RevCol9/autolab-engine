@@ -15,8 +15,9 @@ from toolkit.data_clean.config import DataCleanConfig
 from toolkit.data_clean.export import export_dataset
 from toolkit.data_clean.filters import apply_cleanvision_filters
 from training.dataset import read_class_names, validate_image_dir, validate_yolo_labels
-from training.paths import safe_id
-from training.run_artifacts import reset_run_artifacts
+from training.hparams import resolve_model_path
+from training.paths import resolve_pretrained_model_path, safe_id
+from training.run_artifacts import ensure_input_survives_reset, reset_run_artifacts
 from training.resource_sampler import capture_gpu_snapshot
 from training.service import JobManager, TrainJob
 
@@ -261,6 +262,74 @@ class TrainStopStateTest(unittest.TestCase):
         self.assertFalse(result["stopped"])
         self.assertEqual("stopping", result["job"]["status"])
         self.assertFalse(lock.released)
+
+
+class PretrainedModelPathTest(unittest.TestCase):
+    def test_resolves_conventional_best_weight_from_directory(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            model = root / "published" / "weights" / "best.pt"
+            model.parent.mkdir(parents=True)
+            model.write_bytes(b"weights")
+            with patch("training.paths.TRAINING_MODEL_ROOTS", (root,)):
+                resolved = resolve_pretrained_model_path("published")
+            self.assertEqual(str(model), resolved)
+
+    def test_resolves_unique_pt_from_directory(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            model = root / "published" / "custom.pt"
+            model.parent.mkdir()
+            model.write_bytes(b"weights")
+            with patch("training.paths.TRAINING_MODEL_ROOTS", (root,)):
+                resolved = resolve_pretrained_model_path(model.parent)
+            self.assertEqual(str(model), resolved)
+
+    def test_rejects_path_outside_configured_roots(self):
+        with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as other:
+            allowed = Path(tmp).resolve()
+            model = Path(other).resolve() / "model.pt"
+            model.write_bytes(b"weights")
+            with (
+                patch("training.paths.TRAINING_MODEL_ROOTS", (allowed,)),
+                self.assertRaisesRegex(ValueError, "路径越界"),
+            ):
+                resolve_pretrained_model_path(model)
+
+    def test_continue_and_pretrained_path_are_mutually_exclusive(self):
+        with self.assertRaisesRegex(ValueError, "不能同时使用"):
+            resolve_model_path(
+                {
+                    "is_continue": True,
+                    "last_train": "storage/algorithms/demo/models/baseline",
+                    "pretrained_model_path": "/models/best.pt",
+                },
+                task="detection",
+            )
+
+    def test_model_and_pretrained_path_are_mutually_exclusive(self):
+        with self.assertRaisesRegex(ValueError, "不能同时使用"):
+            resolve_model_path(
+                {
+                    "model": "yolo11n.pt",
+                    "pretrained_model_path": "/models/best.pt",
+                },
+                task="detection",
+            )
+
+    def test_empty_pretrained_path_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "不能为空"):
+            resolve_model_path(
+                {"pretrained_model_path": "   "},
+                task="detection",
+            )
+
+    def test_rejects_model_that_would_be_deleted_on_start(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            save_dir = Path(tmp).resolve()
+            model = save_dir / "weights" / "best.pt"
+            with self.assertRaisesRegex(ValueError, "会清理"):
+                ensure_input_survives_reset(model, save_dir)
 
 
 class RunArtifactResetTest(unittest.TestCase):

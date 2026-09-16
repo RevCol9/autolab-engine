@@ -1,6 +1,8 @@
 # autolab-engine 架构说明
 
-详细说明见本地 [`docs/architecture.md`](docs/architecture.md)、[`docs/data-transfer.md`](docs/data-transfer.md)、[`docs/roadmap.md`](docs/roadmap.md)（`docs/` 不入库）。
+详细说明见本地 [`docs/architecture.md`](docs/architecture.md)、
+[`docs/data-transfer.md`](docs/data-transfer.md)、[`docs/roadmap.md`](docs/roadmap.md)
+（`docs/` 不入库）。
 
 本仓库提供两个独立 HTTP 服务，由 systemd 分别管理：
 
@@ -9,7 +11,11 @@
 | 推理/标注 | `run.py` → `api/inference.py` | 21010 | `config/annotation.yaml` |
 | 训练 | `training/run.py` → `api/train.py` | 21011 | `config/training/base.yaml` + 按任务拆分的 YAML |
 
-环境变量：`ANNOTATION_CONFIG_PATH`（推理）、`TRAINING_DETECTION_CONFIG_PATH` / `TRAINING_SEGMENTATION_CONFIG_PATH`（按任务覆盖 YAML）。兼容的 `TRAINING_CONFIG_PATH` 所指 YAML 必须声明 `train_task`，避免检测和分割配置串用；任务由路由选择，不使用全局 `TRAINING_TASK`。
+环境变量：`ANNOTATION_CONFIG_PATH`（推理）、`TRAINING_DETECTION_CONFIG_PATH` /
+`TRAINING_SEGMENTATION_CONFIG_PATH`（按任务覆盖 YAML）。兼容的
+`TRAINING_CONFIG_PATH` 所指 YAML 必须声明 `train_task`，避免检测和分割配置串用；
+任务由路由选择，不使用全局 `TRAINING_TASK`。API 传入 `pretrained_model_path` 时，
+仅从 `NIII_TRAINING_MODEL_ROOTS` 允许的共享目录解析 `.pt` 权重。
 
 ## 配置目录
 

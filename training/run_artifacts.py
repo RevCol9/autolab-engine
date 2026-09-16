@@ -35,6 +35,22 @@ _RUN_FILES = (
 _RUN_GLOBS = ("train_batch*.jpg", "val_batch*.jpg", "events.out.tfevents.*")
 
 
+def ensure_input_survives_reset(input_path: str | Path, save_dir: Path) -> None:
+    """拒绝把训练输入放进启动时会清理的输出目录。"""
+    source = Path(input_path).resolve()
+    save_dir = Path(save_dir).resolve()
+    for name in _RUN_DIRS:
+        artifact_dir = save_dir / name
+        try:
+            source.relative_to(artifact_dir)
+        except ValueError:
+            continue
+        raise ValueError(
+            f"预训练模型位于本次训练会清理的输出目录: {source}；"
+            "请提供独立的模型归档地址"
+        )
+
+
 def reset_run_artifacts(save_dir: Path) -> None:
     """清理同一 trainNum 的旧运行产物，保留 images/labels 与任务配置。"""
     save_dir.mkdir(parents=True, exist_ok=True)
@@ -52,4 +68,8 @@ def reset_run_artifacts(save_dir: Path) -> None:
                 path.unlink()
 
 
-__all__ = ["TRAINING_METRICS_CSV", "reset_run_artifacts"]
+__all__ = [
+    "TRAINING_METRICS_CSV",
+    "ensure_input_survives_reset",
+    "reset_run_artifacts",
+]

@@ -267,6 +267,7 @@ class JobManager:
                 "batch_size": job.param.get("batch_size"),
                 "image_size": job.param.get("image_size"),
                 "model": job.param.get("model"),
+                "pretrained_model_path": job.param.get("pretrained_model_path"),
             },
             "error": job.error,
             "result": job.result,

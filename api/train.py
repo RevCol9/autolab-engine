@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any, Dict, Literal, Optional
 
 from fastapi import FastAPI, HTTPException, Query
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field
 
 from shared.device import is_cuda_device
 from shared.gpu_lock import GpuDeviceLock, parse_device_index
@@ -32,7 +32,7 @@ TrainTask = Literal["detection", "segmentation"]
 
 app = FastAPI(
     title="autolab-training",
-    version="0.3.0",
+    version="0.4.0",
     description=openapi_description("train", summary="YOLO 闭环训练（检测 / 分割）"),
 )
 
@@ -46,6 +46,19 @@ class TrainJobBody(BaseModel):
     batch_size: Optional[int] = None
     image_size: Optional[int] = None
     model: Optional[str] = None
+    pretrained_model_path: Optional[str] = Field(
+        None,
+        description=(
+            "预训练 .pt 文件或模型目录；目录依次查找 weights/best.pt、"
+            "best.pt、唯一直属 .pt 文件"
+        ),
+        validation_alias=AliasChoices(
+            "pretrained_model_path",
+            "pretrainedModelPath",
+            "modelPath",
+            "model_path",
+        ),
+    )
     is_continue: Optional[bool] = None
     last_train: Optional[str] = None
     device: Optional[str] = None

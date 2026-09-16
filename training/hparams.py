@@ -10,7 +10,12 @@ import yaml
 
 from training.backends import get_backend
 from training.dataset import TrainingDataset
-from training.paths import baseline_pt_from_last_train, train_save_dir
+from training.paths import (
+    baseline_pt_from_last_train,
+    resolve_pretrained_model_path,
+    train_save_dir,
+)
+from training.run_artifacts import ensure_input_survives_reset
 from training.settings import resolve_training_device, training_ultralytics_defaults
 
 API_FIELD_ALIASES: Dict[str, str] = {
@@ -26,6 +31,7 @@ JOB_META_KEYS = frozenset(
         "trainNum",
         "is_continue",
         "last_train",
+        "pretrained_model_path",
         "device",
         "train_task",
     }
@@ -49,17 +55,26 @@ def resolve_model_path(
     task: str,
     defaults: Optional[Mapping[str, Any]] = None,
 ) -> str:
+    pretrained_model_path = param.get("pretrained_model_path")
     if _truthy(param.get("is_continue")):
+        if pretrained_model_path is not None:
+            raise ValueError(
+                "is_continue=true 与 pretrained_model_path 不能同时使用"
+            )
         last_train = param.get("last_train")
         if not last_train:
             raise ValueError("is_continue=true 时必须提供 last_train")
         return baseline_pt_from_last_train(str(last_train))
+    if pretrained_model_path is not None:
+        if param.get("model"):
+            raise ValueError("model 与 pretrained_model_path 不能同时使用")
+        return resolve_pretrained_model_path(pretrained_model_path)
     backend = get_backend(task)
     model = param.get("model") or (defaults or {}).get("model") or backend.default_model
     text = str(model).strip()
     if "/" not in text and "\\" not in text:
         return text.lower()
-    return text
+    return resolve_pretrained_model_path(text)
 
 
 def load_training_defaults(task: str) -> Dict[str, Any]:
@@ -88,22 +103,26 @@ def build_job_train_config(
     task: str,
     device: Optional[str] = None,
 ) -> Dict[str, Any]:
-    backend = get_backend(task)
-
     project_id = str(param["projectId"])
     task_id = str(param["taskId"])
     train_num = str(param["trainNum"])
 
-    data_yaml = TrainingDataset.from_job(param).prepare(task=task)
     save_path = train_save_dir(project_id, task_id, train_num)
-    save_path.mkdir(parents=True, exist_ok=True)
-
     config: Dict[str, Any] = load_training_defaults(task)
     config.update(normalize_api_param(param))
+    model_path = resolve_model_path(param, task=task, defaults=config)
+    explicit_model = str(param.get("model") or "")
+    if param.get("pretrained_model_path") or any(
+        separator in explicit_model for separator in ("/", "\\")
+    ):
+        ensure_input_survives_reset(model_path, save_path)
+
+    data_yaml = TrainingDataset.from_job(param).prepare(task=task)
+    save_path.mkdir(parents=True, exist_ok=True)
     config.update(
         {
             "train_task": task,
-            "model": resolve_model_path(param, task=task, defaults=config),
+            "model": model_path,
             "data": str(data_yaml),
             "project": str(save_path.parent),
             "name": save_path.name,
