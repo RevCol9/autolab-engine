@@ -9,6 +9,7 @@ from toolkit.model_crypto.config import (
     ModelCryptoConfig,
     default_model_crypto_config,
 )
+from toolkit.model_crypto.container_v1 import read_model_container, write_model_container
 from toolkit.model_crypto.core import (
     ModelDecryptor,
     decrypt_to_pt,
@@ -42,9 +43,11 @@ __all__ = [
     "is_yolo_checkpoint",
     "load_kek",
     "load_yolo",
+    "read_model_container",
     "resolve_weight_path",
     "restore_plain_weights_from_enc",
     "rotate_kek",
     "unwrap_dek",
     "wrap_dek",
+    "write_model_container",
 ]

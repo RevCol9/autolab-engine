@@ -16,6 +16,7 @@ from toolkit.model_crypto.core import (
     rotate_kek,
 )
 from toolkit.model_crypto.loader import load_yolo
+from toolkit.model_crypto.offline_convert import convert_trusted_pt
 
 
 def _keys_default() -> str:
@@ -83,6 +84,15 @@ def _cmd_rotate_kek(args: argparse.Namespace) -> None:
     )
 
 
+def _cmd_pack_v1(args: argparse.Namespace) -> None:
+    if not args.trust_source_pt:
+        raise SystemExit("pack-v1 只能在隔离构建机处理可信 .pt；请显式指定 --trust-source-pt")
+    result = convert_trusted_pt(
+        args.src, args.dst, task=args.task, key_dir=args.keys,
+    )
+    print(f"已生成并验证加密模型: {result}")
+
+
 def main(argv: list[str] | None = None) -> None:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
     keys_default = _keys_default()
@@ -146,6 +156,14 @@ def main(argv: list[str] | None = None) -> None:
     p_rot.add_argument("--dst", default=None)
     p_rot.add_argument("--kek-id", default=None)
     p_rot.set_defaults(func=_cmd_rotate_kek)
+
+    p_pack = sub.add_parser("pack-v1", help="隔离构建机：可信 .pt 转换为 .niii-model")
+    p_pack.add_argument("--src", required=True)
+    p_pack.add_argument("--dst", required=True)
+    p_pack.add_argument("--task", choices=("detect", "segment"), required=True)
+    p_pack.add_argument("--keys", default=keys_default)
+    p_pack.add_argument("--trust-source-pt", action="store_true")
+    p_pack.set_defaults(func=_cmd_pack_v1)
 
     args = parser.parse_args(argv)
     args.func(args)
