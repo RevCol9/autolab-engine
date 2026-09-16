@@ -7,6 +7,7 @@ numpy>=1.24
 pandas>=2.0
 psutil>=5.9
 tqdm>=4.60
+cleanvision>=0.3.7,<0.4
 
 # HTTP 入口（可选）
 fastapi>=0.110

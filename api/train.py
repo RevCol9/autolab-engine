@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import logging
 import shutil
+import subprocess
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Dict, Literal, Optional
 
@@ -70,7 +72,7 @@ class DataCleanBody(BaseModel):
     outputName: Optional[str] = Field("clean_output", description="输出子目录名，位于 trainNum 下")
     overwrite: Optional[bool] = Field(True, description="是否覆盖已有 clean_output")
     skipCleanvision: Optional[bool] = Field(False, description="true 时跳过全部图像质量过滤，仅做标签校验与导出")
-    requireCleanvision: Optional[bool] = Field(False, description="true 且未安装 cleanvision 时返回 400")
+    requireCleanvision: Optional[bool] = Field(True, description="true 且未安装 cleanvision 时返回 400")
     enabledFilters: Optional[list[str]] = Field(
         None,
         description="启用的过滤器；不传则全部启用。可选: dark, odd_aspect_ratio, low_information, blurry, odd_size, near_duplicates, exact_duplicates, missing_label",
@@ -107,9 +109,36 @@ def _probe_storage() -> Dict[str, Any]:
         return {"ok": False, "path": str(STORAGE_ROOT), "error": str(exc)}
 
 
+@lru_cache(maxsize=1)
 def _probe_yolo_python() -> Dict[str, Any]:
-    py = Path(YOLO_PYTHON)
-    return {"path": str(py), "exists": py.is_file()}
+    configured = str(YOLO_PYTHON).strip()
+    candidate = Path(configured).expanduser()
+    executable = str(candidate) if candidate.is_file() else shutil.which(configured)
+    if not executable:
+        return {"ok": False, "path": configured, "exists": False}
+    try:
+        proc = subprocess.run(
+            [
+                executable,
+                "-c",
+                "import ultralytics; print(getattr(ultralytics, '__version__', 'unknown'))",
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=15,
+        )
+    except Exception as exc:
+        return {"ok": False, "path": executable, "exists": True, "error": str(exc)}
+    if proc.returncode != 0:
+        error = (proc.stderr or proc.stdout or "ultralytics import failed").strip()
+        return {"ok": False, "path": executable, "exists": True, "error": error[-1000:]}
+    return {
+        "ok": True,
+        "path": executable,
+        "exists": True,
+        "ultralytics_version": (proc.stdout or "").strip() or None,
+    }
 
 
 @app.get("/api/health")
@@ -118,18 +147,31 @@ def health() -> Dict[str, Any]:
     device = default_training_device()
     if cur and cur.get("device"):
         device = str(cur["device"])
-    gpu_busy = GpuDeviceLock(device).is_held_by_other()
+    gpu_error = None
+    try:
+        gpu_device = parse_device_index(device)
+        gpu_busy = GpuDeviceLock(device).is_held_by_other()
+    except ValueError as exc:
+        gpu_device = str(device)
+        gpu_busy = False
+        gpu_error = str(exc)
     storage = _probe_storage()
     ultralytics = _probe_ultralytics()
-    degraded = not storage.get("ok") or not ultralytics.get("ok")
+    yolo_python = _probe_yolo_python()
+    degraded = (
+        not storage.get("ok")
+        or not ultralytics.get("ok")
+        or not yolo_python.get("ok")
+        or gpu_error is not None
+    )
     return {
         "status": "degraded" if degraded else "ok",
         "current": cur,
         "train_tasks": registered_tasks(),
-        "yolo_python": _probe_yolo_python(),
+        "yolo_python": yolo_python,
         "storage": storage,
         "ultralytics": ultralytics,
-        "gpu": {"device": parse_device_index(device), "busy": gpu_busy},
+        "gpu": {"device": gpu_device, "busy": gpu_busy, "error": gpu_error},
     }
 
 
@@ -198,10 +240,9 @@ def _run_train_job(body: TrainJobBody, *, task: TrainTask) -> Dict[str, Any]:
 
     param: Dict[str, Any] = body.model_dump(exclude_none=True)
     param.pop("action", None)
-    device_raw = param.pop("device", None)
-    device = resolve_training_device(device_raw)
-
     try:
+        device_raw = param.pop("device", None)
+        device = resolve_training_device(device_raw)
         job = MANAGER.start(param, task=task, device=device)
         return {"status": "success", "job": job}
     except RuntimeError as exc:
@@ -268,6 +309,8 @@ def dataset_clean(endpoint_name: str, body: DataCleanBody) -> Dict[str, Any]:
         )
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except FileExistsError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:

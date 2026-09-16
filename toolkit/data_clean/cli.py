@@ -38,8 +38,16 @@ def main(argv: list[str] | None = None) -> None:
     )
     parser.add_argument(
         "--require-cleanvision",
+        dest="require_cleanvision",
         action="store_true",
+        default=True,
         help="Fail if cleanvision is not installed.",
+    )
+    parser.add_argument(
+        "--allow-missing-cleanvision",
+        dest="require_cleanvision",
+        action="store_false",
+        help="Skip image-quality filters if cleanvision is not installed.",
     )
     parser.add_argument("--dark-brightness-lt", type=float, default=DEFAULT_THRESHOLDS["dark_brightness_lt"])
     parser.add_argument("--odd-aspect-ratio-lt", type=float, default=DEFAULT_THRESHOLDS["odd_aspect_ratio_lt"])

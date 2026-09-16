@@ -12,25 +12,13 @@ from __future__ import annotations
 import fcntl
 import logging
 import os
-import re
 import time
 from pathlib import Path
 from typing import Optional
 
+from shared.device import parse_device_index
+
 logger = logging.getLogger(__name__)
-
-_DEVICE_INDEX_RE = re.compile(r"(?:cuda:)?(\d+)$", re.IGNORECASE)
-
-def parse_device_index(device: str) -> str:
-    """从 ``cuda:0`` / ``0`` 解析 GPU 索引字符串。"""
-    text = (device or "0").strip()
-    match = _DEVICE_INDEX_RE.search(text)
-    if match:
-        return match.group(1)
-    if text.isdigit():
-        return text
-    return "0"
-
 
 def lock_path_for_device(device_index: str) -> Path:
     """锁文件路径，可通过 ``NIII_GPU_LOCK_DIR`` 覆盖目录。"""

@@ -32,7 +32,7 @@ PLATFORM_ROOT = Path(
 def safe_id(name: str, value: object) -> str:
     """单层目录名，禁止路径穿越。"""
     text = str(value or "").strip()
-    if not text or not _SAFE_ID.match(text):
+    if not text or text in {".", ".."} or not _SAFE_ID.fullmatch(text):
         raise ValueError(f"非法 {name}: {value!r}（仅允许字母数字 . _ -）")
     return text
 

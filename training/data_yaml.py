@@ -60,6 +60,16 @@ def labels_dir_for_job(param: Dict[str, Any]) -> Path:
     return STORAGE_ROOT / project_id / "labels"
 
 
+def images_dir_for_job(param: Dict[str, Any]) -> Path:
+    """返回当前训练 run 的 images 目录。"""
+    project_id = safe_id("projectId", param["projectId"])
+    task_id = safe_id("taskId", param["taskId"])
+    train_num = safe_id("trainNum", param.get("trainNum") or "train1")
+    if project_id == "algorithms":
+        return STORAGE_ROOT / "algorithms" / task_id / train_num / "images"
+    return STORAGE_ROOT / project_id / "images"
+
+
 def prepare_data_yaml_for_job(param: Dict[str, Any]) -> Path:
     """生成 Ultralytics data yaml。
 

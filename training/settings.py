@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 from shared.config_yaml import load_merged_yaml, load_yaml_file
+from shared.device import parse_device_index
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 CONFIG_ROOT = REPO_ROOT / "config"
@@ -97,9 +98,13 @@ def default_training_device() -> str:
 
 
 def resolve_training_device(explicit: Optional[str] = None) -> str:
-    if explicit is not None and str(explicit).strip() != "":
-        return str(explicit).strip()
-    return default_training_device()
+    value = (
+        str(explicit).strip()
+        if explicit is not None and str(explicit).strip() != ""
+        else default_training_device()
+    )
+    parse_device_index(value)
+    return value
 
 
 def training_server_host() -> str:

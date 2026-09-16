@@ -9,11 +9,14 @@ import time
 
 import psutil
 
+from shared.device import parse_device_index
+
 SAMPLING_INTERVAL_SEC = 1.0
 
 
 def capture_gpu_snapshot(device: str | int = 0):
-    device_index = int(str(device).strip() or "0")
+    parsed_device = parse_device_index(device)
+    device_index = int(parsed_device) if parsed_device.isdigit() else None
     result = {
         "gpu": 0,
         "gpuName": "N/A",
@@ -21,6 +24,8 @@ def capture_gpu_snapshot(device: str | int = 0):
         "gpuMemTotalMb": 0,
         "device_index": device_index,
     }
+    if device_index is None:
+        return result
     try:
         proc = subprocess.run(
             [

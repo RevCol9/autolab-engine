@@ -125,7 +125,7 @@ def apply_cleanvision_filters(
     except ImportError:
         message = "cleanvision is not installed; skip image-quality filters."
         if config.require_cleanvision:
-            raise RuntimeError(message)
+            raise ValueError(message)
         print(message)
         return
 

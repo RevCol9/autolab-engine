@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import threading
 from typing import Any
 
 from toolkit.data_clean import DataCleanConfig, run_data_clean
 from training.paths import train_save_dir
+
+
+_DATA_CLEAN_LOCK = threading.Lock()
 
 
 def run_storage_data_clean(
@@ -34,7 +38,10 @@ def run_storage_data_clean(
         thresholds=api_params.get("thresholds"),
         enabled_filters=api_params.get("enabledFilters"),
     )
-    result = run_data_clean(data_root, config=cfg)
+    # uvicorn workers=1，但同步 FastAPI 路由仍在线程池中并发执行；串行提交避免
+    # 同一 outputName 的两个清洗请求互相替换导出目录。
+    with _DATA_CLEAN_LOCK:
+        result = run_data_clean(data_root, config=cfg)
     payload = result.to_api_dict()
     payload["projectId"] = project_id
     payload["taskId"] = task_id

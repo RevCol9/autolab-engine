@@ -19,7 +19,6 @@ DEFAULT_SKIP_DIRS = frozenset(
         "release",
         "dist",
         "build",
-        "toolkit",
     }
 )
 
@@ -62,14 +61,16 @@ class CythonBuildConfig:
             project_root=root,
             production_targets=(
                 "annotation/",
+                "api/",
                 "training/",
                 "shared/",
+                "toolkit/data_clean/",
             ),
             entry_scripts=(
                 "run.py",
                 "training/run.py",
             ),
-            never_compile_extra=frozenset(),
+            never_compile_extra=frozenset({"test_model_classes.py"}),
             config_files=(
                 "config/annotation.example.yaml",
                 "config/training/base.example.yaml",

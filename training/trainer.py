@@ -11,6 +11,7 @@ from typing import Any, Dict, Optional
 
 from training.hparams import write_job_train_config
 from training.paths import CLOSED_LOOP_TRAIN_SCRIPT, YOLO_PYTHON, train_save_dir
+from training.run_artifacts import reset_run_artifacts
 
 logger = logging.getLogger(__name__)
 
@@ -56,18 +57,17 @@ def popen_train(
     cmd = build_closed_loop_cmd(param, task=task, device=device)
     save_dir = train_save_dir(str(param["projectId"]), str(param["taskId"]), str(param["trainNum"]))
     log_path = save_dir / "train.log"
-    save_dir.mkdir(parents=True, exist_ok=True)
-    log_fp = open(log_path, "a", encoding="utf-8")
+    reset_run_artifacts(save_dir)
     logger.info("closed_loop_train popen task=%s: %s | log=%s", task, " ".join(cmd), log_path)
-    proc = subprocess.Popen(
-        cmd,
-        cwd=cwd or "/tmp",
-        stdout=log_fp,
-        stderr=subprocess.STDOUT,
-        start_new_session=True,
-        env={**os.environ, "PYTHONUNBUFFERED": "1"},
-    )
-    log_fp.close()
+    with open(log_path, "w", encoding="utf-8") as log_fp:
+        proc = subprocess.Popen(
+            cmd,
+            cwd=cwd or "/tmp",
+            stdout=log_fp,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+            env={**os.environ, "PYTHONUNBUFFERED": "1"},
+        )
     return proc
 
 
