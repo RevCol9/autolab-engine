@@ -1,0 +1,30 @@
+# 权重信封加密配置模板。复制为 config/model_crypto.yaml 后按环境修改。
+# KEK 本体不写在本文件：使用 NIII_MODEL_KEK，或 keys_dir 下的 kek.key。
+
+keys_dir: "/etc/niii/keys"
+kek_id: "default"
+kek_file_name: "kek.key"
+kek_id_file_name: "kek_id.txt"
+
+enc_suffix: "_enc"
+encrypted_mark: "encrypted"
+crypto_version: 2
+
+exclude_dirs:
+  - demo
+  - test
+  - tests
+  - .git
+  - __pycache__
+  - keys
+  - develop
+  - release
+  - dist
+  - build
+  - toolkit
+  - .venv
+  - venv
+
+weight_suffixes:
+  - .pt
+  - .pth

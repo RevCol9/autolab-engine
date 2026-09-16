@@ -1,4 +1,4 @@
-"""权重加载入口：明文与加密路径统一解析，供推理/训练嵌入。"""
+"""权重路径解析与 YOLO 加载入口。"""
 
 from __future__ import annotations
 
@@ -6,11 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from toolkit.model_crypto.config import ModelCryptoConfig, default_model_crypto_config
-from toolkit.model_crypto.core import (
-    ModelDecryptor,
-    _resolve_key_dir,
-    is_encrypted_checkpoint,
-)
+from toolkit.model_crypto.core import ModelDecryptor, is_encrypted_checkpoint
 
 
 def resolve_weight_path(
@@ -18,7 +14,7 @@ def resolve_weight_path(
     *,
     config: ModelCryptoConfig | None = None,
 ) -> Path:
-    """解析权重路径：开发用明文 .pt，部署仅有 *_enc.pt 时自动选用。"""
+    """明文路径不存在时回退到同名 *_enc.pt。"""
     cfg = config or default_model_crypto_config()
     p = Path(path)
     if p.is_file():
@@ -42,22 +38,15 @@ def load_yolo(
     device: str = "cpu",
     meta_path: str | Path | None = None,
     *,
+    kek: bytes | str | None = None,
     config: ModelCryptoConfig | None = None,
     **kwargs: Any,
 ):
-    """
-    统一加载 YOLO：自动识别加密权重并在内存中解密，不落盘明文。
-
-    嵌入推理引擎示例::
-
-        from toolkit.model_crypto import load_yolo
-        yolo = load_yolo(model_path, key_dir="/etc/niii/keys", device="cuda:0")
-    """
+    """加载 YOLO：加密权重在内存解密后构造模型，明文路径走 Ultralytics 原逻辑。"""
     cfg = config or default_model_crypto_config()
     model_path = resolve_weight_path(model, config=cfg)
     if is_encrypted_checkpoint(model_path, config=cfg):
-        resolved_keys = _resolve_key_dir(model_path, key_dir, cfg)
-        return ModelDecryptor(resolved_keys, config=cfg).build_yolo(
+        return ModelDecryptor(key_dir, kek=kek, config=cfg).build_yolo(
             model_path,
             device=device,
             meta_path=meta_path,

@@ -1,4 +1,4 @@
-"""YOLO 权重加解密核心实现。"""
+"""YOLO 权重信封加解密：KEK 封装 DEK，DEK 加密 state_dict。"""
 
 from __future__ import annotations
 
@@ -15,7 +15,17 @@ import yaml
 from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
-from toolkit.model_crypto.config import ModelCryptoConfig, default_model_crypto_config
+from toolkit.model_crypto.config import (
+    CRYPTO_VERSION,
+    ModelCryptoConfig,
+    default_model_crypto_config,
+)
+from toolkit.model_crypto.envelope import (
+    init_kek,
+    load_kek,
+    unwrap_dek,
+    wrap_dek,
+)
 
 
 def _cfg(config: ModelCryptoConfig | None) -> ModelCryptoConfig:
@@ -23,7 +33,7 @@ def _cfg(config: ModelCryptoConfig | None) -> ModelCryptoConfig:
 
 
 def _peek_checkpoint(path: Path, config: ModelCryptoConfig) -> dict[str, Any] | None:
-    if not path.exists() or path.suffix not in config.weight_suffixes:
+    if not path.exists() or path.suffix.lower() not in config.weight_suffixes:
         return None
     try:
         return torch.load(path, map_location="cpu", weights_only=False)
@@ -38,7 +48,12 @@ def is_encrypted_checkpoint(
 ) -> bool:
     cfg = _cfg(config)
     ckpt = _peek_checkpoint(Path(path), cfg)
-    return bool(ckpt and ckpt.get(cfg.encrypted_mark) and "encrypted_state_dict" in ckpt)
+    return bool(
+        ckpt
+        and ckpt.get(cfg.encrypted_mark)
+        and "encrypted_state_dict" in ckpt
+        and "envelope" in ckpt
+    )
 
 
 def _extract_yolo_model(ckpt: dict[str, Any]):
@@ -64,113 +79,80 @@ def is_yolo_checkpoint(
     return _extract_yolo_model(ckpt) is not None
 
 
-def _resolve_key_dir(
-    model_path: Path,
-    key_dir: str | Path | None,
-    config: ModelCryptoConfig,
-) -> Path:
-    if key_dir is not None:
-        return Path(key_dir)
-    for candidate in (Path.cwd() / "keys", model_path.parent / "keys"):
-        key_file = candidate / config.key_file_name
-        nonce_file = candidate / config.nonce_file_name
-        if key_file.is_file() and nonce_file.is_file():
-            return candidate
-    raise FileNotFoundError(
-        "找不到密钥目录。请将密钥放在项目根 keys/，"
-        "或调用 load_yolo(..., key_dir='your/keys') 显式指定。"
-    )
-
-
-def _validate_aes_materials(key: bytes, nonce: bytes) -> None:
-    if len(key) != 32:
-        raise ValueError(f"AES key 长度必须为 32 字节，当前为 {len(key)}")
-    if len(nonce) != 16:
-        raise ValueError(f"AES-CTR nonce 长度必须为 16 字节，当前为 {len(nonce)}")
-
-
 def _ctr_crypt(key: bytes, nonce: bytes, payload: bytes) -> bytes:
-    _validate_aes_materials(key, nonce)
+    if len(key) != 32:
+        raise ValueError(f"AES key 须 32 字节，当前 {len(key)}")
+    if len(nonce) != 16:
+        raise ValueError(f"CTR nonce 须 16 字节，当前 {len(nonce)}")
     cipher = Cipher(algorithms.AES(key), modes.CTR(nonce), backend=default_backend())
-    # CTR 加解密同一套 update；禁止跨张量复用同一 nonce。
     cryptor = cipher.encryptor()
     return cryptor.update(payload) + cryptor.finalize()
 
 
-class _AESEncryptor:
-    def __init__(
-        self,
-        key_dir: str | Path,
-        config: ModelCryptoConfig,
-        *,
-        reuse_existing: bool = True,
-    ) -> None:
-        self.key_dir = Path(key_dir)
-        self.config = config
-        self.key_dir.mkdir(parents=True, exist_ok=True)
-        key_file = self.key_dir / config.key_file_name
-        nonce_file = self.key_dir / config.nonce_file_name
-        if reuse_existing and key_file.is_file() and nonce_file.is_file():
-            self.key = key_file.read_bytes()
-            self.nonce = nonce_file.read_bytes()
-            _validate_aes_materials(self.key, self.nonce)
-            return
-        self.key = secrets.token_bytes(32)
-        self.nonce = secrets.token_bytes(16)
-        key_file.write_bytes(self.key)
-        nonce_file.write_bytes(self.nonce)
+class _TensorCipher:
+    """DEK 下的按张量 AES-CTR；每个参数独立 nonce，避免密钥流复用。"""
+
+    def __init__(self, key: bytes) -> None:
+        if len(key) != 32:
+            raise ValueError("DEK 须 32 字节")
+        self.key = key
 
     def encrypt_tensor(self, tensor: torch.Tensor) -> tuple[torch.Tensor, bytes]:
-        """加密单个张量，返回 (密文, 本张量专用 nonce)。"""
         nonce = secrets.token_bytes(16)
         arr = tensor.detach().cpu().float().numpy()
         encrypted = _ctr_crypt(self.key, nonce, arr.tobytes())
         out = np.frombuffer(encrypted, dtype=np.float32)
         return torch.from_numpy(out.copy()).view(tensor.shape), nonce
 
-
-class _AESDecryptor:
-    def __init__(self, key_dir: str | Path, config: ModelCryptoConfig) -> None:
-        key_dir = Path(key_dir)
-        self.key = (key_dir / config.key_file_name).read_bytes()
-        self.nonce = (key_dir / config.nonce_file_name).read_bytes()
-        _validate_aes_materials(self.key, self.nonce)
-
     def decrypt_tensor(
         self,
         encrypted: torch.Tensor,
         dtype: torch.dtype,
         *,
-        nonce: bytes | None = None,
+        nonce: bytes,
     ) -> torch.Tensor:
-        # 新格式：每张量独立 nonce；旧格式回退到密钥目录中的全局 nonce。
-        use_nonce = self.nonce if nonce is None else nonce
         arr = encrypted.detach().cpu().float().numpy()
-        decrypted = _ctr_crypt(self.key, use_nonce, arr.tobytes())
+        decrypted = _ctr_crypt(self.key, nonce, arr.tobytes())
         out = np.frombuffer(decrypted, dtype=np.float32)
         return torch.from_numpy(out.copy()).view(encrypted.shape).to(dtype)
 
 
 class ModelDecryptor:
-    """解密器：可单独注入训练/推理服务。"""
+    """内存解密：KEK → DEK → state_dict，不写明文权重。"""
 
     def __init__(
         self,
-        key_dir: str | Path,
+        key_dir: str | Path | None = None,
         *,
+        kek: bytes | str | None = None,
         config: ModelCryptoConfig | None = None,
     ) -> None:
         self.config = _cfg(config)
-        self.key_dir = Path(key_dir)
-        self._decryptor = _AESDecryptor(self.key_dir, self.config)
+        self.key_dir = Path(key_dir) if key_dir is not None else None
+        self._kek_arg = kek
+        self._kek: bytes | None = None
+        self._kek_id: str | None = None
+
+    def _ensure_kek(self, model_path: Path | None = None) -> tuple[bytes, str]:
+        if self._kek is not None and self._kek_id is not None:
+            return self._kek, self._kek_id
+        self._kek, self._kek_id = load_kek(
+            kek=self._kek_arg,
+            key_dir=self.key_dir,
+            model_path=model_path,
+            config=self.config,
+        )
+        return self._kek, self._kek_id
 
     def read_encrypted_checkpoint(self, encrypted_path: str | Path) -> dict[str, Any]:
         encrypted_path = Path(encrypted_path)
         checkpoint = torch.load(encrypted_path, map_location="cpu", weights_only=False)
         if not checkpoint.get(self.config.encrypted_mark):
-            raise ValueError(f"{encrypted_path} 不是加密权重文件。")
-        if "encrypted_state_dict" not in checkpoint:
-            raise ValueError(f"{encrypted_path} 缺少 encrypted_state_dict。")
+            raise ValueError(f"{encrypted_path} 不是加密权重")
+        if "encrypted_state_dict" not in checkpoint or "envelope" not in checkpoint:
+            raise ValueError(f"{encrypted_path} 缺少 encrypted_state_dict / envelope")
+        if "nonce_metadata" not in checkpoint:
+            raise ValueError(f"{encrypted_path} 缺少 nonce_metadata")
         return checkpoint
 
     def get_model_metadata(
@@ -181,11 +163,11 @@ class ModelDecryptor:
         if "model_yaml" in checkpoint and "model_names" in checkpoint:
             return checkpoint["model_yaml"], checkpoint["model_names"]
         if not meta_path:
-            raise ValueError("加密文件缺少 model_yaml/model_names，请提供 meta_path。")
+            raise ValueError("加密文件缺少 model_yaml/model_names")
         meta = torch.load(meta_path, map_location="cpu", weights_only=False)
         model = _extract_yolo_model(meta)
         if model is None:
-            raise ValueError(f"{meta_path} 无法提取 model/ema 元数据。")
+            raise ValueError(f"{meta_path} 无法提取 model/ema")
         return model.yaml, dict(model.names)
 
     def decrypt_state_dict(
@@ -193,15 +175,23 @@ class ModelDecryptor:
         encrypted_path: str | Path | None = None,
         checkpoint: dict[str, Any] | None = None,
     ) -> dict[str, torch.Tensor]:
-        checkpoint = checkpoint or self.read_encrypted_checkpoint(encrypted_path)
+        path = Path(encrypted_path) if encrypted_path is not None else None
+        checkpoint = checkpoint or self.read_encrypted_checkpoint(path)
+        kek, _ = self._ensure_kek(path)
+        dek = unwrap_dek(kek, checkpoint["envelope"])
+        cipher = _TensorCipher(dek)
+
         dtype_meta = checkpoint["dtype_metadata"]
-        nonce_meta = checkpoint.get("nonce_metadata") or {}
+        nonce_meta = checkpoint["nonce_metadata"]
         state_dict: dict[str, torch.Tensor] = {}
-        for name, enc_tensor in checkpoint["encrypted_state_dict"].items():
-            dtype = getattr(torch, dtype_meta[name].replace("torch.", ""))
-            raw_nonce = nonce_meta.get(name)
-            nonce = bytes(raw_nonce) if raw_nonce is not None else None
-            state_dict[name] = self._decryptor.decrypt_tensor(enc_tensor, dtype, nonce=nonce)
+        try:
+            for name, enc_tensor in checkpoint["encrypted_state_dict"].items():
+                dtype = getattr(torch, dtype_meta[name].replace("torch.", ""))
+                nonce = bytes(nonce_meta[name])
+                state_dict[name] = cipher.decrypt_tensor(enc_tensor, dtype, nonce=nonce)
+        finally:
+            cipher.key = b"\x00" * 32
+            dek = b"\x00" * 32
         return state_dict
 
     def build_yolo(
@@ -212,14 +202,14 @@ class ModelDecryptor:
     ):
         from ultralytics import YOLO as _UltralyticsYOLO
 
+        encrypted_path = Path(encrypted_path)
         checkpoint = self.read_encrypted_checkpoint(encrypted_path)
         yaml_cfg, names = self.get_model_metadata(checkpoint, meta_path)
-        state_dict = self.decrypt_state_dict(checkpoint=checkpoint)
+        state_dict = self.decrypt_state_dict(encrypted_path, checkpoint=checkpoint)
 
         with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False, encoding="utf-8") as f:
             yaml.safe_dump(yaml_cfg, f, allow_unicode=True, sort_keys=False)
             yaml_path = f.name
-
         try:
             model = _UltralyticsYOLO(yaml_path)
             model.model.load_state_dict(state_dict, strict=True)
@@ -230,14 +220,15 @@ class ModelDecryptor:
             os.unlink(yaml_path)
 
     def verify(self, encrypted_path: str | Path, original_path: str | Path) -> float:
+        """返回解密权重相对明文的最大绝对误差。"""
         decrypted = self.decrypt_state_dict(encrypted_path)
         original = torch.load(original_path, map_location="cpu", weights_only=False)
         original_model = _extract_yolo_model(original)
         if original_model is None:
-            raise ValueError(f"{original_path} 无法提取原始 model/ema。")
+            raise ValueError(f"{original_path} 无法提取 model/ema")
         original_sd = original_model.state_dict()
         if set(decrypted) != set(original_sd):
-            raise ValueError("解密后权重 key 与原始模型不一致。")
+            raise ValueError("解密权重与原始 state_dict 的 key 不一致")
         max_diff = 0.0
         for name in original_sd:
             diff = (decrypted[name].float() - original_sd[name].float()).abs().max().item()
@@ -250,29 +241,36 @@ def encrypt_weights(
     dst_pt: str | Path | None = None,
     key_dir: str | Path | None = None,
     *,
+    kek: bytes | str | None = None,
+    kek_id: str | None = None,
     config: ModelCryptoConfig | None = None,
-    reuse_keys: bool = True,
     skip_existing: bool = False,
 ) -> Path | None:
+    """明文检查点 → 信封加密文件；每个权重文件使用独立 DEK。"""
     cfg = _cfg(config)
     src_pt = Path(src_pt)
     if is_encrypted_checkpoint(src_pt, config=cfg):
-        print(f"跳过（已是加密文件）: {src_pt}")
+        print(f"跳过（已加密）: {src_pt}")
         return src_pt
 
     dst_pt = Path(dst_pt) if dst_pt else cfg.encrypted_path_for(src_pt)
-    if key_dir is None:
-        key_dir = Path.cwd() / "keys"
     if skip_existing and dst_pt.exists():
         print(f"跳过（已存在）: {dst_pt}")
         return dst_pt
 
+    kek_bytes, resolved_kid = load_kek(
+        kek=kek, key_dir=key_dir, model_path=src_pt, config=cfg
+    )
+    if kek_id:
+        resolved_kid = kek_id
+
     checkpoint = torch.load(src_pt, map_location="cpu", weights_only=False)
     model = _extract_yolo_model(checkpoint)
     if model is None:
-        raise ValueError(f"{src_pt} 不是包含 model/ema state_dict 的 YOLO 检查点。")
-    encryptor = _AESEncryptor(key_dir, cfg, reuse_existing=reuse_keys)
+        raise ValueError(f"{src_pt} 不是含 model/ema 的 YOLO 检查点")
 
+    dek = secrets.token_bytes(32)
+    cipher = _TensorCipher(dek)
     encrypted_sd: dict[str, torch.Tensor] = {}
     dtype_meta: dict[str, str] = {}
     nonce_meta: dict[str, bytes] = {}
@@ -281,25 +279,67 @@ def encrypt_weights(
 
     for i, (name, tensor) in enumerate(state_dict.items(), start=1):
         dtype_meta[name] = str(tensor.dtype)
-        encrypted_sd[name], nonce_meta[name] = encryptor.encrypt_tensor(tensor)
+        encrypted_sd[name], nonce_meta[name] = cipher.encrypt_tensor(tensor)
         if i % 100 == 0 or i == total:
             print(f"  加密进度: {i}/{total}")
 
+    envelope = wrap_dek(kek_bytes, dek, kek_id=resolved_kid)
+    cipher.key = b"\x00" * 32
+    dek = b"\x00" * 32
+
     out = copy.deepcopy(checkpoint)
     out[cfg.encrypted_mark] = True
+    out["crypto_version"] = cfg.crypto_version or CRYPTO_VERSION
+    out["envelope"] = envelope
     out["encrypted_state_dict"] = encrypted_sd
     out["dtype_metadata"] = dtype_meta
     out["nonce_metadata"] = nonce_meta
     out["model_yaml"] = model.yaml
     out["model_names"] = dict(model.names)
-    # 去掉明文权重，避免密文旁仍残留 model/ema
     out.pop("model", None)
     out.pop("ema", None)
 
     dst_pt.parent.mkdir(parents=True, exist_ok=True)
     torch.save(out, dst_pt)
-    print(f"加密完成: {src_pt.name} -> {dst_pt}")
+    print(f"加密完成: {src_pt.name} -> {dst_pt} (kek_id={resolved_kid})")
     return dst_pt
+
+
+def rotate_kek(
+    enc_path: str | Path,
+    *,
+    old_kek: bytes | str | None = None,
+    new_kek: bytes | str | None = None,
+    old_key_dir: str | Path | None = None,
+    new_key_dir: str | Path | None = None,
+    new_kek_id: str | None = None,
+    dst_pt: str | Path | None = None,
+    config: ModelCryptoConfig | None = None,
+) -> Path:
+    """更换 KEK：仅重封装 DEK，不重加密权重张量。"""
+    cfg = _cfg(config)
+    enc_path = Path(enc_path)
+    checkpoint = torch.load(enc_path, map_location="cpu", weights_only=False)
+    if not checkpoint.get(cfg.encrypted_mark) or "envelope" not in checkpoint:
+        raise ValueError(f"{enc_path} 不是信封加密权重")
+
+    old_bytes, _ = load_kek(
+        kek=old_kek, key_dir=old_key_dir, model_path=enc_path, config=cfg
+    )
+    new_bytes, new_kid = load_kek(
+        kek=new_kek, key_dir=new_key_dir, model_path=enc_path, config=cfg
+    )
+    if new_kek_id:
+        new_kid = new_kek_id
+
+    dek = unwrap_dek(old_bytes, checkpoint["envelope"])
+    checkpoint["envelope"] = wrap_dek(new_bytes, dek, kek_id=new_kid)
+    dek = b"\x00" * 32
+
+    out = Path(dst_pt) if dst_pt else enc_path
+    torch.save(checkpoint, out)
+    print(f"KEK 轮换完成: {enc_path} -> {out} (kek_id={new_kid})")
+    return out
 
 
 def discover_yolo_weights(
@@ -310,16 +350,14 @@ def discover_yolo_weights(
 ) -> list[Path]:
     cfg = _cfg(config)
     root = Path(root).resolve()
-    excludes = set(exclude_dirs or cfg.default_exclude_dirs)
+    excludes = set(exclude_dirs or cfg.exclude_dirs)
     results: list[Path] = []
     seen: set[Path] = set()
     for suffix in sorted(cfg.weight_suffixes):
         for path in sorted(root.rglob(f"*{suffix}")):
-            if path in seen:
+            if path in seen or path.suffix.lower() != suffix.lower():
                 continue
             if any(part in excludes for part in path.parts):
-                continue
-            if path.suffix.lower() != suffix.lower():
                 continue
             if path.stem.endswith(cfg.enc_suffix):
                 continue
@@ -334,17 +372,16 @@ def encrypt_all_weights(
     key_dir: str | Path | None = None,
     exclude_dirs: Iterable[str] | None = None,
     *,
+    kek: bytes | str | None = None,
     config: ModelCryptoConfig | None = None,
     skip_existing: bool = True,
 ) -> list[Path]:
     cfg = _cfg(config)
-    key_dir = Path(key_dir or Path(root) / "keys")
-    key_dir.mkdir(parents=True, exist_ok=True)
-    key_file = key_dir / cfg.key_file_name
-    _AESEncryptor(key_dir, cfg, reuse_existing=key_file.exists())
+    keys = key_dir or cfg.resolved_keys_dir() or (Path(root) / "keys")
+    load_kek(kek=kek, key_dir=keys, config=cfg)
 
     files = discover_yolo_weights(root, exclude_dirs=exclude_dirs, config=cfg)
-    print(f"发现 {len(files)} 个 YOLO 权重待加密，密钥目录: {key_dir.resolve()}")
+    print(f"发现 {len(files)} 个待加密 YOLO 权重")
     encrypted: list[Path] = []
     failed: list[tuple[Path, str]] = []
 
@@ -352,9 +389,9 @@ def encrypt_all_weights(
         try:
             dst = encrypt_weights(
                 src,
-                key_dir=key_dir,
+                key_dir=keys,
+                kek=kek,
                 config=cfg,
-                reuse_keys=True,
                 skip_existing=skip_existing,
             )
             if dst:
@@ -363,10 +400,9 @@ def encrypt_all_weights(
             failed.append((src, str(exc)))
             print(f"失败: {src} -> {exc}")
 
-    print(f"\n完成: 成功 {len(encrypted)}，失败 {len(failed)}")
-    if failed:
-        for src, err in failed:
-            print(f"  - {src}: {err}")
+    print(f"完成: 成功 {len(encrypted)}，失败 {len(failed)}")
+    for src, err in failed:
+        print(f"  - {src}: {err}")
     return encrypted
 
 
@@ -375,22 +411,19 @@ def decrypt_to_pt(
     dst_pt: str | Path | None = None,
     key_dir: str | Path | None = None,
     *,
+    kek: bytes | str | None = None,
     config: ModelCryptoConfig | None = None,
 ) -> Path:
+    """离线导出明文检查点；在线推理应使用 load_yolo。"""
     cfg = _cfg(config)
     enc_path = Path(enc_path)
     if not is_encrypted_checkpoint(enc_path, config=cfg):
-        raise ValueError(f"{enc_path} 不是加密权重文件。")
+        raise ValueError(f"{enc_path} 不是信封加密权重")
 
-    if dst_pt is None:
-        dst_pt = cfg.plain_path_for_enc(enc_path)
-    else:
-        dst_pt = Path(dst_pt)
-
-    resolved_keys = _resolve_key_dir(enc_path, key_dir, cfg)
-    dec = ModelDecryptor(resolved_keys, config=cfg)
+    dst_pt = Path(dst_pt) if dst_pt else cfg.plain_path_for_enc(enc_path)
+    dec = ModelDecryptor(key_dir, kek=kek, config=cfg)
     checkpoint = dec.read_encrypted_checkpoint(enc_path)
-    state_dict = dec.decrypt_state_dict(checkpoint=checkpoint)
+    state_dict = dec.decrypt_state_dict(enc_path, checkpoint=checkpoint)
     yaml_cfg, names = dec.get_model_metadata(checkpoint)
 
     from ultralytics import YOLO as _UltralyticsYOLO
@@ -409,6 +442,8 @@ def decrypt_to_pt(
     out = copy.deepcopy(checkpoint)
     for key in (
         cfg.encrypted_mark,
+        "crypto_version",
+        "envelope",
         "encrypted_state_dict",
         "dtype_metadata",
         "nonce_metadata",
@@ -416,13 +451,12 @@ def decrypt_to_pt(
         "model_names",
     ):
         out.pop(key, None)
-
     out["model"] = restored
     out.pop("ema", None)
 
     dst_pt.parent.mkdir(parents=True, exist_ok=True)
     torch.save(out, dst_pt)
-    print(f"解密恢复: {enc_path} -> {dst_pt}")
+    print(f"已导出明文: {enc_path} -> {dst_pt}")
     return dst_pt
 
 
@@ -431,6 +465,7 @@ def restore_plain_weights_from_enc(
     dst_root: str | Path,
     key_dir: str | Path | None = None,
     *,
+    kek: bytes | str | None = None,
     config: ModelCryptoConfig | None = None,
 ) -> list[Path]:
     cfg = _cfg(config)
@@ -440,5 +475,19 @@ def restore_plain_weights_from_enc(
     for enc_path in sorted(enc_root.rglob(f"*{cfg.enc_suffix}.pt")):
         rel = enc_path.relative_to(enc_root)
         dst_pt = dst_root / cfg.plain_path_for_enc(rel)
-        restored.append(decrypt_to_pt(enc_path, dst_pt, key_dir, config=cfg))
+        restored.append(decrypt_to_pt(enc_path, dst_pt, key_dir, kek=kek, config=cfg))
     return restored
+
+
+__all__ = [
+    "ModelDecryptor",
+    "decrypt_to_pt",
+    "discover_yolo_weights",
+    "encrypt_all_weights",
+    "encrypt_weights",
+    "init_kek",
+    "is_encrypted_checkpoint",
+    "is_yolo_checkpoint",
+    "restore_plain_weights_from_enc",
+    "rotate_kek",
+]
