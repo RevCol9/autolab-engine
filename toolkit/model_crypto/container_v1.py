@@ -44,7 +44,9 @@ class ModelContainer:
 
 def _json_value(value: Any) -> Any:
     if isinstance(value, dict):
-        return {str(key): _json_value(item) for key, item in value.items()}
+        if any(not isinstance(key, str) for key in value):
+            raise TypeError("模型元数据 key 必须是字符串")
+        return {key: _json_value(item) for key, item in value.items()}
     if isinstance(value, (list, tuple)):
         return [_json_value(item) for item in value]
     if value is None or isinstance(value, (str, int, float, bool)):
@@ -81,6 +83,8 @@ def _encode_payload(
     for name, tensor in sorted(state_dict.items()):
         if not isinstance(tensor, torch.Tensor) or tensor.layout != torch.strided:
             raise TypeError(f"不支持的张量布局: {name}")
+        if tensor.ndim > 16:
+            raise ValueError(f"加密模型张量 shape 维度超限: {name}")
         dtype_name = str(tensor.dtype).removeprefix("torch.")
         if dtype_name not in _DTYPES:
             raise TypeError(f"不支持的张量 dtype: {name}={tensor.dtype}")
@@ -252,12 +256,13 @@ def read_model_container(path: str | Path, *, kek: bytes) -> ModelContainer:
     if path.suffix != ".niii-model":
         raise ValueError("模型文件必须以 .niii-model 结尾")
     max_file_bytes = _HEADER.size + MAX_KEY_ID_BYTES + MAX_PLAINTEXT_BYTES + 16
-    if path.stat().st_size > max_file_bytes:
-        raise ValueError("加密模型超过首版容器的 1 GiB 上限")
     with path.open("rb") as stream:
-        data = stream.read(max_file_bytes + 1)
-    if len(data) > max_file_bytes:
-        raise ValueError("加密模型超过首版容器的 1 GiB 上限")
+        file_size = os.fstat(stream.fileno()).st_size
+        if file_size > max_file_bytes:
+            raise ValueError("加密模型超过首版容器的 1 GiB 上限")
+        data = stream.read(file_size)
+        if len(data) != file_size or stream.read(1):
+            raise ValueError("加密模型读取期间文件长度发生变化")
     if len(data) < _HEADER.size:
         raise ValueError("加密模型文件头不完整")
     (
