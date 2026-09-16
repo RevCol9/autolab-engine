@@ -4,24 +4,13 @@ from __future__ import annotations
 
 from typing import Any, Dict, Mapping
 
-from training.backends.base import TrainBackend
 from training.backends.detection import DetectionBackend
-from training.data_yaml import images_dir_for_job, labels_dir_for_job, prepare_data_yaml_for_job
-from training.label_validation import validate_image_dir, validate_yolo_labels
-from training.reporting import metric_lookup, trainer_lr, trainer_metric
-
-_DETECTION_METRICS = DetectionBackend()
+from training.reporting import metric_lookup, trainer_metric
 
 
-class SegmentationBackend(TrainBackend):
+class SegmentationBackend(DetectionBackend):
     task = "segmentation"
     default_model = "yolo11n-seg.pt"
-
-    def validate_job(self, param: Mapping[str, Any]) -> None:
-        payload = dict(param)
-        prepare_data_yaml_for_job(payload)
-        validate_image_dir(images_dir_for_job(payload))
-        validate_yolo_labels(labels_dir_for_job(payload), task=self.task)
 
     def build_epoch_row(
         self,
@@ -35,7 +24,7 @@ class SegmentationBackend(TrainBackend):
         total_spend: float,
         remaining: float,
     ) -> Dict[str, Any]:
-        row = _DETECTION_METRICS.build_epoch_row(
+        row = super().build_epoch_row(
             trainer,
             metrics,
             resource,

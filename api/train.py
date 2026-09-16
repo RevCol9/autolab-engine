@@ -15,15 +15,16 @@ from pathlib import Path
 from typing import Any, Dict, Literal, Optional
 
 from fastapi import FastAPI, HTTPException, Query
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
-from training.data_clean_service import run_storage_data_clean
-from training.registry import registered_tasks
-from training.settings import default_training_device, resolve_training_device
+from shared.device import is_cuda_device
 from shared.gpu_lock import GpuDeviceLock, parse_device_index
+from shared.openapi_docs import openapi_description
+from training.data_clean_service import run_storage_data_clean
+from training.backends import registered_tasks
+from training.settings import default_training_device, resolve_training_device
 from training.paths import STORAGE_ROOT, YOLO_PYTHON
 from training.service import MANAGER
-from shared.openapi_docs import openapi_description
 
 logger = logging.getLogger(__name__)
 
@@ -45,12 +46,11 @@ class TrainJobBody(BaseModel):
     batch_size: Optional[int] = None
     image_size: Optional[int] = None
     model: Optional[str] = None
-    is_continue: Optional[Any] = None
+    is_continue: Optional[bool] = None
     last_train: Optional[str] = None
     device: Optional[str] = None
 
-    class Config:
-        extra = "allow"
+    model_config = ConfigDict(extra="allow")
 
 
 # 兼容旧 schema 名
@@ -75,7 +75,11 @@ class DataCleanBody(BaseModel):
     requireCleanvision: Optional[bool] = Field(True, description="true 且未安装 cleanvision 时返回 400")
     enabledFilters: Optional[list[str]] = Field(
         None,
-        description="启用的过滤器；不传则全部启用。可选: dark, odd_aspect_ratio, low_information, blurry, odd_size, near_duplicates, exact_duplicates, missing_label",
+        description=(
+            "启用的过滤器；不传则全部启用。可选: dark, odd_aspect_ratio, "
+            "low_information, blurry, odd_size, near_duplicates, exact_duplicates, "
+            "missing_label"
+        ),
     )
     thresholds: Optional[DataCleanThresholds] = Field(
         None,
@@ -150,10 +154,13 @@ def health() -> Dict[str, Any]:
     gpu_error = None
     try:
         gpu_device = parse_device_index(device)
-        gpu_busy = GpuDeviceLock(device).is_held_by_other()
+        gpu_lock = GpuDeviceLock(device) if is_cuda_device(device) else None
+        gpu_busy = gpu_lock.is_held_by_other() if gpu_lock is not None else False
+        physical_device = gpu_lock.device_key if gpu_lock is not None else None
     except ValueError as exc:
         gpu_device = str(device)
         gpu_busy = False
+        physical_device = None
         gpu_error = str(exc)
     storage = _probe_storage()
     ultralytics = _probe_ultralytics()
@@ -171,7 +178,12 @@ def health() -> Dict[str, Any]:
         "yolo_python": yolo_python,
         "storage": storage,
         "ultralytics": ultralytics,
-        "gpu": {"device": gpu_device, "busy": gpu_busy, "error": gpu_error},
+        "gpu": {
+            "device": gpu_device,
+            "physical_device": physical_device,
+            "busy": gpu_busy,
+            "error": gpu_error,
+        },
     }
 
 
@@ -224,7 +236,9 @@ def _run_train_job(body: TrainJobBody, *, task: TrainTask) -> Dict[str, Any]:
     action = (body.action or "").strip().lower()
     if action == "stop":
         result = MANAGER.stop()
-        return {"status": "success", **result}
+        job_status = (result.get("job") or {}).get("status")
+        response_status = "stopping" if job_status == "stopping" else "success"
+        return {"status": response_status, **result}
 
     if action != "start":
         raise HTTPException(status_code=400, detail="action 须为 start 或 stop")

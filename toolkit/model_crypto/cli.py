@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import logging
 
 from toolkit.model_crypto.config import default_model_crypto_config
 from toolkit.model_crypto.core import (
@@ -83,6 +84,7 @@ def _cmd_rotate_kek(args: argparse.Namespace) -> None:
 
 
 def main(argv: list[str] | None = None) -> None:
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
     keys_default = _keys_default()
     parser = argparse.ArgumentParser(description="YOLO 权重信封加解密")
     sub = parser.add_subparsers(dest="command", required=True)

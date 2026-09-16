@@ -1,4 +1,4 @@
-"""本地联调：浏览器上传图片、选 model_key、查看推理 JSON。"""
+"""开发调试页：浏览器上传图片、选 model_key、查看推理 JSON。"""
 
 from fastapi.responses import HTMLResponse
 

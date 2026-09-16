@@ -2,15 +2,11 @@
 
 from __future__ import annotations
 
-import logging
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List
 
-from annotation.engines.base import BaseEngine
-from shared.gpu_lock import GpuDeviceLock, parse_device_index
 from annotation.settings import ModelConfig, Settings
-
-logger = logging.getLogger(__name__)
+from shared.gpu_lock import GpuDeviceLock
 
 
 def model_entry(cfg: ModelConfig, *, loaded: bool, include_path: bool = False) -> Dict[str, Any]:
@@ -58,49 +54,32 @@ def probe_default_weight(settings: Settings) -> Dict[str, Any]:
             continue
         if not m.path:
             return {"model_key": key, "ok": False, "reason": "path_not_configured"}
-        exists = Path(m.path).is_file()
-        return {"model_key": key, "ok": exists, "reason": None if exists else "weight_missing"}
+        path = Path(m.path)
+        if m.engine == "locateanything" and not settings.locate_local_files_only:
+            exists = True
+            kind = "model_id_or_directory"
+        else:
+            kind = m.path_kind
+            exists = path.is_file() if kind == "file" else path.is_dir()
+        return {
+            "model_key": key,
+            "ok": exists,
+            "kind": kind,
+            "reason": None if exists else "weight_missing",
+        }
     return {"model_key": key, "ok": False, "reason": "model_not_in_config"}
 
 
 def probe_gpu_locks(settings: Settings) -> List[Dict[str, Any]]:
-    indices = {parse_device_index(m.device) for m in settings.models if m.device}
-    indices.add(parse_device_index(settings.cuda_visible_devices.split(",")[0]))
+    devices = {model.device for model in settings.models if model.requires_cuda}
     out: List[Dict[str, Any]] = []
-    for idx in sorted(indices):
-        lock = GpuDeviceLock(idx)
-        out.append({"device": idx, "busy": lock.is_held_by_other()})
+    for device in sorted(devices):
+        lock = GpuDeviceLock(device)
+        out.append(
+            {
+                "device": device,
+                "physical_device": lock.device_key,
+                "busy": lock.is_held_by_other(),
+            }
+        )
     return out
-
-
-def unload_engine(
-    model_key: str,
-    engines: Dict[str, BaseEngine],
-    active_key: Optional[str],
-) -> Tuple[List[str], Optional[str]]:
-    """卸载单模型；返回 (剩余 loaded 列表, 新 active_key)。"""
-    engine = engines.pop(model_key, None)
-    if engine is None:
-        return list(engines.keys()), active_key
-    try:
-        engine.unload()
-    except Exception as exc:
-        logger.warning("unload %s: %s", model_key, exc)
-    new_active = active_key
-    if active_key == model_key:
-        new_active = next(iter(engines), None)
-    return list(engines.keys()), new_active
-
-
-def unload_all_engines(
-    engines: Dict[str, BaseEngine],
-) -> None:
-    keys = list(engines.keys())
-    for key in keys:
-        engine = engines.pop(key, None)
-        if engine is None:
-            continue
-        try:
-            engine.unload()
-        except Exception as exc:
-            logger.warning("unload all %s: %s", key, exc)

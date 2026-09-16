@@ -17,14 +17,10 @@ from PIL import Image
 
 from annotation.bootstrap import SETTINGS
 from annotation.box_format import apply_box_format
-from annotation.mask_format import SUPPORTED_MASK_FORMATS
 from annotation.box_format import SUPPORTED_BOX_FORMATS
-from annotation.registry import (
-    _gpu_lock,
-    cross_gpu_session,
-    ensure_model_engine,
-    is_vlm_engine,
-)
+from annotation.engines.base import BaseEngine
+from annotation.mask_format import SUPPORTED_MASK_FORMATS
+from annotation.registry import MODEL_RUNTIME
 from annotation.settings import ModelConfig
 
 
@@ -57,9 +53,25 @@ def normalize_box_format(box_format: Optional[str]) -> str:
     return fmt
 
 
+def validate_predict_options(
+    *,
+    conf: Optional[float],
+    iou: Optional[float],
+    imgsz: Optional[int],
+    sam3_threshold: Optional[float] = None,
+) -> None:
+    """校验所有入口共用的数值推理参数。"""
+    for name, value in (("conf", conf), ("iou", iou), ("sam3_threshold", sam3_threshold)):
+        if value is not None and not 0.0 <= float(value) <= 1.0:
+            raise HTTPException(status_code=400, detail=f"{name} 须位于 [0, 1]")
+    if imgsz is not None and int(imgsz) <= 0:
+        raise HTTPException(status_code=400, detail="imgsz 须为正整数")
+
+
 def run_predict_unlocked(
     img: Image.Image,
     cfg: ModelConfig,
+    engine: BaseEngine,
     *,
     conf: Optional[float],
     iou: Optional[float],
@@ -73,9 +85,8 @@ def run_predict_unlocked(
     sam3_boxes: Optional[str] = None,
     mask_format: str = "polygon_norm_pct",
 ) -> Dict[str, Any]:
-    if is_vlm_engine(cfg):
+    if cfg.is_vlm:
         try:
-            engine = ensure_model_engine(cfg.key)
             result = engine.predict(
                 img,
                 task=task,
@@ -107,7 +118,6 @@ def run_predict_unlocked(
             result["segments"] = []
         return result
 
-    engine = ensure_model_engine(cfg.key)
     is_segment = (cfg.task or "detect").lower() == "segment"
     if is_segment:
         result = engine.predict(
@@ -149,9 +159,8 @@ def run_predict_locked(
     **kwargs: Any,
 ) -> Dict[str, Any]:
     """进程内线程锁 + 跨进程 GPU 锁，串行化 load/predict。"""
-    with _gpu_lock:
-        with cross_gpu_session(cfg):
-            return run_predict_unlocked(img, cfg, **kwargs)
+    with MODEL_RUNTIME.use_engine(cfg) as (_, engine):
+        return run_predict_unlocked(img, cfg, engine, **kwargs)
 
 
 def parse_image_ids(raw: Optional[str], n: int) -> List[str]:

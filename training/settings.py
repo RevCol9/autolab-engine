@@ -18,7 +18,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 CONFIG_ROOT = REPO_ROOT / "config"
 TRAINING_CONFIG_DIR = CONFIG_ROOT / "training"
 
-_TRAINING_META_KEYS = frozenset({"server", "gpu", "device"})
+_TRAINING_META_KEYS = frozenset({"server", "gpu", "device", "train_task"})
 
 _VALID_TRAINING_TASKS = frozenset({"detection", "segmentation"})
 
@@ -59,10 +59,31 @@ def load_training_base_config() -> Dict[str, Any]:
 @lru_cache(maxsize=8)
 def load_training_config_for_task(task: str) -> Dict[str, Any]:
     task_key = _validate_task(task)
-    if explicit := os.getenv("TRAINING_CONFIG_PATH", "").strip():
+    task_env = f"TRAINING_{task_key.upper()}_CONFIG_PATH"
+    explicit = os.getenv(task_env, "").strip()
+    legacy_explicit = os.getenv("TRAINING_CONFIG_PATH", "").strip()
+    if explicit or legacy_explicit:
+        explicit = explicit or legacy_explicit
         task_path = Path(explicit).expanduser().resolve()
         if not task_path.is_file():
-            raise FileNotFoundError(f"TRAINING_CONFIG_PATH 指向的文件不存在: {task_path}")
+            raise FileNotFoundError(f"训练任务配置文件不存在: {task_path}")
+        override = load_yaml_file(task_path)
+        declared_task = str(override.get("train_task") or "").strip().lower()
+        if legacy_explicit and not os.getenv(task_env, "").strip():
+            if not declared_task:
+                raise ValueError(
+                    "TRAINING_CONFIG_PATH 指向的配置必须声明 train_task；"
+                    f"也可改用 {task_env} 明确绑定路由"
+                )
+            if declared_task != task_key:
+                raise ValueError(
+                    f"TRAINING_CONFIG_PATH 的 train_task={declared_task!r} "
+                    f"与请求任务 {task_key!r} 不一致"
+                )
+        elif declared_task and declared_task != task_key:
+            raise ValueError(
+                f"{task_env} 的 train_task={declared_task!r} 与请求任务不一致"
+            )
         return load_merged_yaml([_resolve_existing(_training_base_candidates()), task_path])
     return load_merged_yaml(
         [

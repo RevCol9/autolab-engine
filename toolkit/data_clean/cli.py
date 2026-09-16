@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import logging
 
 from toolkit.data_clean.config import DEFAULT_THRESHOLDS, DataCleanConfig
 from toolkit.data_clean.paths import parse_cli_path
@@ -27,6 +28,7 @@ def build_config_from_args(args: argparse.Namespace) -> DataCleanConfig:
 
 
 def main(argv: list[str] | None = None) -> None:
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
     parser = argparse.ArgumentParser(description="Clean an image dataset with labels.")
     parser.add_argument("--data-root", required=True, type=parse_cli_path, help="Dataset root directory.")
     parser.add_argument("--output-name", default="clean_output", help="Output directory name under data-root.")

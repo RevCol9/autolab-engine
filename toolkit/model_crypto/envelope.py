@@ -19,6 +19,8 @@ from toolkit.model_crypto.config import (
     default_model_crypto_config,
 )
 
+_ENVELOPE_AAD = b"niii-model-crypto-envelope-v3"
+
 
 def _cfg(config: ModelCryptoConfig | None) -> ModelCryptoConfig:
     return config or default_model_crypto_config()
@@ -27,10 +29,12 @@ def _cfg(config: ModelCryptoConfig | None) -> ModelCryptoConfig:
 def parse_kek_material(raw: str | bytes) -> bytes:
     """将 hex / base64 / 原始 32 字节解析为 KEK。"""
     if isinstance(raw, bytes):
-        data = raw.strip()
-        if len(data) == 32:
-            return data
-        text = data.decode("utf-8", errors="strict").strip()
+        if len(raw) == 32:
+            return raw
+        try:
+            text = raw.decode("utf-8", errors="strict").strip()
+        except UnicodeDecodeError as exc:
+            raise ValueError("KEK 必须是 32 字节（raw / hex / base64）") from exc
     else:
         text = str(raw).strip()
 
@@ -158,11 +162,12 @@ def wrap_dek(kek: bytes, dek: bytes, *, kek_id: str) -> dict[str, Any]:
     if len(kek) != 32 or len(dek) != 32:
         raise ValueError("KEK/DEK 均须为 32 字节")
     nonce = secrets.token_bytes(12)
-    packed = AESGCM(kek).encrypt(nonce, dek, None)
+    packed = AESGCM(kek).encrypt(nonce, dek, _ENVELOPE_AAD)
     return {
         "alg": KEK_WRAP_ALG,
         "kek_id": kek_id,
         "nonce": nonce,
+        "aad": _ENVELOPE_AAD,
         "dek_wrapped": packed[:-16],
         "tag": packed[-16:],
     }
@@ -177,7 +182,8 @@ def unwrap_dek(kek: bytes, envelope: dict[str, Any]) -> bytes:
         raise ValueError(f"不支持的 envelope 算法: {alg}")
     nonce = bytes(envelope["nonce"])
     wrapped = bytes(envelope["dek_wrapped"]) + bytes(envelope["tag"])
+    aad = bytes(envelope["aad"]) if "aad" in envelope else None
     try:
-        return AESGCM(kek).decrypt(nonce, wrapped, None)
+        return AESGCM(kek).decrypt(nonce, wrapped, aad)
     except Exception as exc:
         raise ValueError("无法解开 DEK：KEK 不匹配或 envelope 已损坏") from exc

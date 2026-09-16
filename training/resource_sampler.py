@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import subprocess
 import threading
@@ -9,20 +10,23 @@ import time
 
 import psutil
 
-from shared.device import parse_device_index
+from shared.device import parse_device_index, physical_cuda_device
 
 SAMPLING_INTERVAL_SEC = 1.0
+logger = logging.getLogger(__name__)
 
 
 def capture_gpu_snapshot(device: str | int = 0):
     parsed_device = parse_device_index(device)
     device_index = int(parsed_device) if parsed_device.isdigit() else None
+    physical_device = physical_cuda_device(device)
     result = {
         "gpu": 0,
         "gpuName": "N/A",
         "gpuMemUsedMb": 0,
         "gpuMemTotalMb": 0,
         "device_index": device_index,
+        "physical_device": physical_device,
     }
     if device_index is None:
         return result
@@ -30,6 +34,7 @@ def capture_gpu_snapshot(device: str | int = 0):
         proc = subprocess.run(
             [
                 "nvidia-smi",
+                f"--id={physical_device}",
                 "--query-gpu=utilization.gpu,memory.used,memory.total,name",
                 "--format=csv,noheader,nounits",
             ],
@@ -38,9 +43,12 @@ def capture_gpu_snapshot(device: str | int = 0):
             check=False,
             timeout=3,
         )
+        if proc.returncode != 0:
+            logger.debug("nvidia-smi 采样失败: %s", (proc.stderr or "").strip())
+            return result
         stdout = (proc.stdout or "").strip()
         lines = [ln for ln in stdout.splitlines() if ln.strip()]
-        line = lines[device_index] if device_index < len(lines) else (lines[0] if lines else "")
+        line = lines[0] if lines else ""
         if line:
             parts = [part.strip() for part in line.split(",")]
             if len(parts) >= 4:
@@ -48,8 +56,8 @@ def capture_gpu_snapshot(device: str | int = 0):
                 result["gpuMemUsedMb"] = _to_int(parts[1])
                 result["gpuMemTotalMb"] = _to_int(parts[2])
                 result["gpuName"] = parts[3]
-    except Exception:
-        pass
+    except (OSError, subprocess.SubprocessError) as exc:
+        logger.debug("无法采集 GPU 指标: %s", exc)
     return result
 
 

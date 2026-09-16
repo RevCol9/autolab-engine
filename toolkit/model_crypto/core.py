@@ -3,6 +3,10 @@
 from __future__ import annotations
 
 import copy
+import hashlib
+import hmac
+import json
+import logging
 import os
 import secrets
 import tempfile
@@ -27,6 +31,10 @@ from toolkit.model_crypto.envelope import (
     wrap_dek,
 )
 
+logger = logging.getLogger(__name__)
+_PAYLOAD_AUTH_ALG = "HMAC-SHA256"
+_PAYLOAD_AUTH_CONTEXT = b"niii-model-crypto-payload-auth-v1"
+
 
 def _cfg(config: ModelCryptoConfig | None) -> ModelCryptoConfig:
     return config or default_model_crypto_config()
@@ -36,7 +44,8 @@ def _peek_checkpoint(path: Path, config: ModelCryptoConfig) -> dict[str, Any] | 
     if not path.exists() or path.suffix.lower() not in config.weight_suffixes:
         return None
     try:
-        return torch.load(path, map_location="cpu", weights_only=False)
+        checkpoint = torch.load(path, map_location="cpu", weights_only=False)
+        return checkpoint if isinstance(checkpoint, dict) else None
     except Exception:
         return None
 
@@ -87,6 +96,83 @@ def _ctr_crypt(key: bytes, nonce: bytes, payload: bytes) -> bytes:
     cipher = Cipher(algorithms.AES(key), modes.CTR(nonce), backend=default_backend())
     cryptor = cipher.encryptor()
     return cryptor.update(payload) + cryptor.finalize()
+
+
+def _canonical_json(value: Any) -> bytes:
+    def normalize(item: Any) -> Any:
+        if isinstance(item, dict):
+            return {str(key): normalize(val) for key, val in item.items()}
+        if isinstance(item, (list, tuple)):
+            return [normalize(val) for val in item]
+        if isinstance(item, (str, int, float, bool)) or item is None:
+            return item
+        return str(item)
+
+    return json.dumps(
+        normalize(value),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+
+
+def _mac_chunk(mac: hmac.HMAC, payload: bytes) -> None:
+    mac.update(len(payload).to_bytes(8, "big"))
+    mac.update(payload)
+
+
+def _payload_auth_tag(dek: bytes, checkpoint: dict[str, Any]) -> bytes:
+    """认证全部密文张量及影响模型解释方式的元数据。"""
+    mac_key = hmac.new(dek, _PAYLOAD_AUTH_CONTEXT, hashlib.sha256).digest()
+    mac = hmac.new(mac_key, digestmod=hashlib.sha256)
+    encrypted = checkpoint["encrypted_state_dict"]
+    dtype_meta = checkpoint["dtype_metadata"]
+    nonce_meta = checkpoint["nonce_metadata"]
+    for name in sorted(encrypted):
+        tensor = encrypted[name].detach().cpu().contiguous()
+        _mac_chunk(mac, name.encode("utf-8"))
+        _mac_chunk(mac, str(dtype_meta[name]).encode("ascii"))
+        _mac_chunk(mac, _canonical_json(list(tensor.shape)))
+        _mac_chunk(mac, bytes(nonce_meta[name]))
+        _mac_chunk(mac, tensor.numpy().tobytes())
+    _mac_chunk(mac, _canonical_json(checkpoint.get("model_yaml")))
+    _mac_chunk(mac, _canonical_json(checkpoint.get("model_names")))
+    return mac.digest()
+
+
+def _verify_payload_auth(dek: bytes, checkpoint: dict[str, Any]) -> None:
+    auth = checkpoint.get("payload_auth")
+    if not isinstance(auth, dict):
+        raise ValueError("加密权重缺少 payload_auth；请用 crypto_version=3 重新加密")
+    if auth.get("alg") != _PAYLOAD_AUTH_ALG:
+        raise ValueError(f"不支持的 payload_auth 算法: {auth.get('alg')!r}")
+    expected = _payload_auth_tag(dek, checkpoint)
+    try:
+        actual = bytes(auth["tag"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError("加密权重 payload_auth.tag 无效") from exc
+    if not hmac.compare_digest(actual, expected):
+        raise ValueError("加密权重完整性校验失败：密文或模型元数据已损坏")
+
+
+def _atomic_torch_save(payload: Any, destination: Path) -> None:
+    """同目录落临时文件并 fsync，成功后原子替换目标。"""
+    destination = Path(destination)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    fd, temporary_name = tempfile.mkstemp(
+        prefix=f".{destination.name}.",
+        suffix=".tmp",
+        dir=destination.parent,
+    )
+    os.close(fd)
+    temporary = Path(temporary_name)
+    try:
+        torch.save(payload, temporary)
+        with temporary.open("r+b") as handle:
+            os.fsync(handle.fileno())
+        os.replace(temporary, destination)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 class _TensorCipher:
@@ -147,12 +233,18 @@ class ModelDecryptor:
     def read_encrypted_checkpoint(self, encrypted_path: str | Path) -> dict[str, Any]:
         encrypted_path = Path(encrypted_path)
         checkpoint = torch.load(encrypted_path, map_location="cpu", weights_only=False)
+        if not isinstance(checkpoint, dict):
+            raise ValueError(f"{encrypted_path} 不是有效的检查点字典")
         if not checkpoint.get(self.config.encrypted_mark):
             raise ValueError(f"{encrypted_path} 不是加密权重")
         if "encrypted_state_dict" not in checkpoint or "envelope" not in checkpoint:
             raise ValueError(f"{encrypted_path} 缺少 encrypted_state_dict / envelope")
         if "nonce_metadata" not in checkpoint:
             raise ValueError(f"{encrypted_path} 缺少 nonce_metadata")
+        if "payload_auth" not in checkpoint and checkpoint["envelope"].get("aad"):
+            raise ValueError(
+                f"{encrypted_path} 缺少 payload_auth，文件可能已损坏"
+            )
         return checkpoint
 
     def get_model_metadata(
@@ -185,6 +277,14 @@ class ModelDecryptor:
         nonce_meta = checkpoint["nonce_metadata"]
         state_dict: dict[str, torch.Tensor] = {}
         try:
+            if "payload_auth" in checkpoint:
+                _verify_payload_auth(dek, checkpoint)
+            else:
+                logger.warning(
+                    "loading legacy unauthenticated encrypted weights: %s; "
+                    "rotate KEK or re-encrypt to upgrade",
+                    path,
+                )
             for name, enc_tensor in checkpoint["encrypted_state_dict"].items():
                 dtype = getattr(torch, dtype_meta[name].replace("torch.", ""))
                 nonce = bytes(nonce_meta[name])
@@ -250,12 +350,12 @@ def encrypt_weights(
     cfg = _cfg(config)
     src_pt = Path(src_pt)
     if is_encrypted_checkpoint(src_pt, config=cfg):
-        print(f"跳过（已加密）: {src_pt}")
+        logger.info("跳过已加密权重: %s", src_pt)
         return src_pt
 
     dst_pt = Path(dst_pt) if dst_pt else cfg.encrypted_path_for(src_pt)
     if skip_existing and dst_pt.exists():
-        print(f"跳过（已存在）: {dst_pt}")
+        logger.info("跳过已存在的加密权重: %s", dst_pt)
         return dst_pt
 
     kek_bytes, resolved_kid = load_kek(
@@ -277,31 +377,35 @@ def encrypt_weights(
     state_dict = model.state_dict()
     total = len(state_dict)
 
-    for i, (name, tensor) in enumerate(state_dict.items(), start=1):
-        dtype_meta[name] = str(tensor.dtype)
-        encrypted_sd[name], nonce_meta[name] = cipher.encrypt_tensor(tensor)
-        if i % 100 == 0 or i == total:
-            print(f"  加密进度: {i}/{total}")
+    try:
+        for i, (name, tensor) in enumerate(state_dict.items(), start=1):
+            dtype_meta[name] = str(tensor.dtype)
+            encrypted_sd[name], nonce_meta[name] = cipher.encrypt_tensor(tensor)
+            if i % 100 == 0 or i == total:
+                logger.info("权重加密进度: %d/%d", i, total)
 
-    envelope = wrap_dek(kek_bytes, dek, kek_id=resolved_kid)
-    cipher.key = b"\x00" * 32
-    dek = b"\x00" * 32
+        envelope = wrap_dek(kek_bytes, dek, kek_id=resolved_kid)
+        out = copy.deepcopy(checkpoint)
+        out[cfg.encrypted_mark] = True
+        out["crypto_version"] = max(int(cfg.crypto_version), CRYPTO_VERSION)
+        out["envelope"] = envelope
+        out["encrypted_state_dict"] = encrypted_sd
+        out["dtype_metadata"] = dtype_meta
+        out["nonce_metadata"] = nonce_meta
+        out["model_yaml"] = model.yaml
+        out["model_names"] = dict(model.names)
+        out["payload_auth"] = {
+            "alg": _PAYLOAD_AUTH_ALG,
+            "tag": _payload_auth_tag(dek, out),
+        }
+        out.pop("model", None)
+        out.pop("ema", None)
 
-    out = copy.deepcopy(checkpoint)
-    out[cfg.encrypted_mark] = True
-    out["crypto_version"] = cfg.crypto_version or CRYPTO_VERSION
-    out["envelope"] = envelope
-    out["encrypted_state_dict"] = encrypted_sd
-    out["dtype_metadata"] = dtype_meta
-    out["nonce_metadata"] = nonce_meta
-    out["model_yaml"] = model.yaml
-    out["model_names"] = dict(model.names)
-    out.pop("model", None)
-    out.pop("ema", None)
-
-    dst_pt.parent.mkdir(parents=True, exist_ok=True)
-    torch.save(out, dst_pt)
-    print(f"加密完成: {src_pt.name} -> {dst_pt} (kek_id={resolved_kid})")
+        _atomic_torch_save(out, dst_pt)
+    finally:
+        cipher.key = b"\x00" * 32
+        dek = b"\x00" * 32
+    logger.info("权重加密完成: %s -> %s (kek_id=%s)", src_pt.name, dst_pt, resolved_kid)
     return dst_pt
 
 
@@ -333,12 +437,20 @@ def rotate_kek(
         new_kid = new_kek_id
 
     dek = unwrap_dek(old_bytes, checkpoint["envelope"])
+    if "payload_auth" in checkpoint:
+        _verify_payload_auth(dek, checkpoint)
+    else:
+        checkpoint["crypto_version"] = CRYPTO_VERSION
+        checkpoint["payload_auth"] = {
+            "alg": _PAYLOAD_AUTH_ALG,
+            "tag": _payload_auth_tag(dek, checkpoint),
+        }
     checkpoint["envelope"] = wrap_dek(new_bytes, dek, kek_id=new_kid)
     dek = b"\x00" * 32
 
     out = Path(dst_pt) if dst_pt else enc_path
-    torch.save(checkpoint, out)
-    print(f"KEK 轮换完成: {enc_path} -> {out} (kek_id={new_kid})")
+    _atomic_torch_save(checkpoint, out)
+    logger.info("KEK 轮换完成: %s -> %s (kek_id=%s)", enc_path, out, new_kid)
     return out
 
 
@@ -381,7 +493,7 @@ def encrypt_all_weights(
     load_kek(kek=kek, key_dir=keys, config=cfg)
 
     files = discover_yolo_weights(root, exclude_dirs=exclude_dirs, config=cfg)
-    print(f"发现 {len(files)} 个待加密 YOLO 权重")
+    logger.info("发现 %d 个待加密 YOLO 权重", len(files))
     encrypted: list[Path] = []
     failed: list[tuple[Path, str]] = []
 
@@ -398,11 +510,11 @@ def encrypt_all_weights(
                 encrypted.append(dst)
         except Exception as exc:
             failed.append((src, str(exc)))
-            print(f"失败: {src} -> {exc}")
+            logger.exception("权重加密失败: %s", src)
 
-    print(f"完成: 成功 {len(encrypted)}，失败 {len(failed)}")
+    logger.info("批量加密完成: 成功 %d，失败 %d", len(encrypted), len(failed))
     for src, err in failed:
-        print(f"  - {src}: {err}")
+        logger.error("权重加密失败汇总: %s: %s", src, err)
     return encrypted
 
 
@@ -449,14 +561,14 @@ def decrypt_to_pt(
         "nonce_metadata",
         "model_yaml",
         "model_names",
+        "payload_auth",
     ):
         out.pop(key, None)
     out["model"] = restored
     out.pop("ema", None)
 
-    dst_pt.parent.mkdir(parents=True, exist_ok=True)
-    torch.save(out, dst_pt)
-    print(f"已导出明文: {enc_path} -> {dst_pt}")
+    _atomic_torch_save(out, dst_pt)
+    logger.info("已导出明文权重: %s -> %s", enc_path, dst_pt)
     return dst_pt
 
 

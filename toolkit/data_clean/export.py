@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import csv
 import hashlib
+import logging
 import shutil
 import uuid
 from pathlib import Path, PurePosixPath
@@ -12,6 +13,8 @@ from typing import Dict, List, Sequence, Set, Tuple
 from toolkit.data_clean.config import DataCleanConfig
 from toolkit.data_clean.discovery import LabelCandidate
 from toolkit.data_clean.paths import append_suffix, image_base_key, normalize_rel
+
+logger = logging.getLogger(__name__)
 
 
 def _assert_output_child(output_root: Path, data_root: Path) -> tuple[Path, Path]:
@@ -230,10 +233,10 @@ def export_dataset(
         "removal_log": str(output_root / "removal_log.csv"),
     }
 
-    print(f"Exported images: {summary['exported']}")
-    print(f"Removed images: {summary['removed']}")
-    print(f"Renamed because of output collisions: {collision_renamed}")
-    print(f"Output directory: {output_root}")
-    print(f"Manifest: {output_root / 'kept_manifest.csv'}")
-    print(f"Removal log: {output_root / 'removal_log.csv'}")
+    logger.info("Exported images: %s", summary["exported"])
+    logger.info("Removed images: %s", summary["removed"])
+    logger.info("Renamed because of output collisions: %s", collision_renamed)
+    logger.info("Output directory: %s", output_root)
+    logger.info("Manifest: %s", output_root / "kept_manifest.csv")
+    logger.info("Removal log: %s", output_root / "removal_log.csv")
     return summary

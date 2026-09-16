@@ -5,11 +5,12 @@ from __future__ import annotations
 import shutil
 from pathlib import Path
 
+TRAINING_METRICS_CSV = "trainning_data.csv"  # 外部既有契约，保留历史拼写
 
 _RUN_DIRS = ("weights", "baseline_eval", "trained_eval")
 _RUN_FILES = (
     "train.log",
-    "trainning_data.csv",
+    TRAINING_METRICS_CSV,
     "report.json",
     "results.csv",
     "results.png",
@@ -51,4 +52,4 @@ def reset_run_artifacts(save_dir: Path) -> None:
                 path.unlink()
 
 
-__all__ = ["reset_run_artifacts"]
+__all__ = ["TRAINING_METRICS_CSV", "reset_run_artifacts"]

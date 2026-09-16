@@ -5,20 +5,12 @@ from __future__ import annotations
 from typing import Any, Dict, Mapping
 
 from training.backends.base import TrainBackend
-from training.data_yaml import images_dir_for_job, labels_dir_for_job, prepare_data_yaml_for_job
-from training.label_validation import validate_image_dir, validate_yolo_labels
 from training.reporting import metric_lookup, trainer_lr, trainer_metric
 
 
 class DetectionBackend(TrainBackend):
     task = "detection"
     default_model = "yolo11n.pt"
-
-    def validate_job(self, param: Mapping[str, Any]) -> None:
-        payload = dict(param)
-        prepare_data_yaml_for_job(payload)
-        validate_image_dir(images_dir_for_job(payload))
-        validate_yolo_labels(labels_dir_for_job(payload), task=self.task)
 
     def build_epoch_row(
         self,

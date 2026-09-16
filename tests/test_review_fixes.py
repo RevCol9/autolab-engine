@@ -1,18 +1,24 @@
 from __future__ import annotations
 
+import os
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
-from shared.device import parse_device_index
+from annotation.settings import parse_models
+from shared.device import device_lock_key, parse_device_index, physical_cuda_device
+from shared.gpu_lock import GpuDeviceLock
 from toolkit.cython_build.config import CythonBuildConfig
 from toolkit.data_clean.config import DataCleanConfig
 from toolkit.data_clean.export import export_dataset
 from toolkit.data_clean.filters import apply_cleanvision_filters
-from training.label_validation import validate_image_dir, validate_yolo_labels
+from training.dataset import read_class_names, validate_image_dir, validate_yolo_labels
 from training.paths import safe_id
 from training.run_artifacts import reset_run_artifacts
+from training.resource_sampler import capture_gpu_snapshot
+from training.service import JobManager, TrainJob
 
 
 class SafePathTest(unittest.TestCase):
@@ -25,6 +31,16 @@ class SafePathTest(unittest.TestCase):
         for value in ("images", "labels", "weights", "../clean", "nested/clean"):
             with self.subTest(value=value), self.assertRaises(ValueError):
                 DataCleanConfig(output_name=value)
+
+    def test_clean_thresholds_reject_invalid_values(self):
+        for thresholds in (
+            {"dark_brightness_lt": 1.1},
+            {"odd_size_lt": 0},
+            {"blurry_blurriness_lt": float("nan")},
+            {"unknown": 1.0},
+        ):
+            with self.subTest(thresholds=thresholds), self.assertRaises(ValueError):
+                DataCleanConfig(thresholds=thresholds)
 
 
 class AtomicCleanExportTest(unittest.TestCase):
@@ -101,14 +117,17 @@ class LabelValidationTest(unittest.TestCase):
             labels = Path(tmp) / "labels" / "nested"
             labels.mkdir(parents=True)
             (labels / "one.txt").write_text("0 0.5 0.5 0.2 0.3\n", encoding="utf-8")
-            self.assertEqual(1, validate_yolo_labels(labels.parent, task="detection"))
+            self.assertEqual(
+                1,
+                validate_yolo_labels(labels.parent, task="detection", class_count=1),
+            )
 
     def test_detection_rejects_wrong_column_count(self):
         with tempfile.TemporaryDirectory() as tmp:
             labels = Path(tmp)
             (labels / "bad.txt").write_text("0 0.5 0.5 0.2\n", encoding="utf-8")
             with self.assertRaisesRegex(ValueError, "5 列"):
-                validate_yolo_labels(labels, task="detection")
+                validate_yolo_labels(labels, task="detection", class_count=1)
 
     def test_segmentation_rejects_non_numeric_polygon(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -118,7 +137,7 @@ class LabelValidationTest(unittest.TestCase):
                 encoding="utf-8",
             )
             with self.assertRaisesRegex(ValueError, "须为数字"):
-                validate_yolo_labels(labels, task="segmentation")
+                validate_yolo_labels(labels, task="segmentation", class_count=1)
 
     def test_image_validation_accepts_nested_image(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -126,6 +145,23 @@ class LabelValidationTest(unittest.TestCase):
             images.mkdir()
             (images / "one.jpg").write_bytes(b"not-decoded-during-preflight")
             self.assertEqual(1, validate_image_dir(Path(tmp)))
+
+    def test_classes_must_be_non_empty_and_unique(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            classes = Path(tmp) / "classes.txt"
+            classes.write_text("helmet\nhelmet\n", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "重复类别"):
+                read_class_names(classes)
+            classes.write_text("\n", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "不能为空"):
+                read_class_names(classes)
+
+    def test_label_class_id_must_exist_in_classes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            labels = Path(tmp)
+            (labels / "bad.txt").write_text("1 0.5 0.5 0.2 0.3\n", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "超出 classes.txt 范围"):
+                validate_yolo_labels(labels, task="detection", class_count=1)
 
 
 class DeviceParsingTest(unittest.TestCase):
@@ -137,6 +173,94 @@ class DeviceParsingTest(unittest.TestCase):
     def test_multi_gpu_is_rejected_until_scheduler_supports_it(self):
         with self.assertRaisesRegex(ValueError, "单设备"):
             parse_device_index("0,1")
+
+    def test_lock_key_uses_physical_visible_device(self):
+        self.assertEqual("3", physical_cuda_device("cuda:1", visible_devices="2,3"))
+        self.assertEqual("3", device_lock_key("1", visible_devices="2,3"))
+
+    def test_resource_sampler_queries_physical_visible_device(self):
+        completed = SimpleNamespace(
+            returncode=0,
+            stdout="42, 1024, 8192, GPU Three\n",
+            stderr="",
+        )
+        with (
+            patch.dict(os.environ, {"CUDA_VISIBLE_DEVICES": "2,3"}),
+            patch("training.resource_sampler.subprocess.run", return_value=completed) as run,
+        ):
+            snapshot = capture_gpu_snapshot("cuda:1")
+
+        self.assertIn("--id=3", run.call_args.args[0])
+        self.assertEqual("3", snapshot["physical_device"])
+        self.assertEqual(42, snapshot["gpu"])
+
+    def test_device_outside_visible_range_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "超出 CUDA_VISIBLE_DEVICES"):
+            physical_cuda_device("1", visible_devices="4")
+
+    def test_device_lock_is_mutually_exclusive(self):
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(
+            os.environ,
+            {"NIII_GPU_LOCK_DIR": tmp, "CUDA_VISIBLE_DEVICES": "0"},
+        ):
+            first = GpuDeviceLock("0")
+            second = GpuDeviceLock("cuda:0")
+            self.assertTrue(first.acquire(blocking=False))
+            self.assertFalse(second.acquire(blocking=False))
+            first.release()
+            self.assertTrue(second.acquire(blocking=False))
+            second.release()
+
+
+class AnnotationConfigValidationTest(unittest.TestCase):
+    def test_unknown_engine_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "engine=.*不受支持"):
+            parse_models([{"key": "bad", "engine": "sam4", "task": "detect"}])
+
+    def test_duplicate_model_key_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "key 重复"):
+            parse_models([{"key": "same"}, {"key": "same"}])
+
+    def test_invalid_yolo_task_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "YOLO 模型.*task"):
+            parse_models([{"key": "bad", "engine": "yolo", "task": "vlm"}])
+
+    def test_invalid_threshold_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "conf 须位于"):
+            parse_models([{"key": "bad", "conf": 1.5}])
+
+
+class TrainStopStateTest(unittest.TestCase):
+    def test_gpu_lock_is_kept_when_process_does_not_terminate(self):
+        class FakeProcess:
+            pid = 123
+
+            @staticmethod
+            def poll():
+                return None
+
+        class FakeLock:
+            released = False
+
+            def release(self):
+                self.released = True
+
+        manager = JobManager()
+        lock = FakeLock()
+        manager._job = TrainJob(
+            job_id="train-1",
+            param={},
+            status="running",
+            pid=123,
+            _proc=FakeProcess(),
+            _gpu_lock=lock,
+        )
+        with patch("training.service.kill_process_group", return_value=False):
+            result = manager.stop()
+
+        self.assertFalse(result["stopped"])
+        self.assertEqual("stopping", result["job"]["status"])
+        self.assertFalse(lock.released)
 
 
 class RunArtifactResetTest(unittest.TestCase):

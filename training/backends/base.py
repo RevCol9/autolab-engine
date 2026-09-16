@@ -20,10 +20,6 @@ class TrainBackend(ABC):
         """未传 model 且非续训时的默认预训练权重。"""
 
     @abstractmethod
-    def validate_job(self, param: Mapping[str, Any]) -> None:
-        """启动前校验数据集等；失败抛 ValueError / FileNotFoundError。"""
-
-    @abstractmethod
     def build_epoch_row(
         self,
         trainer: Any,

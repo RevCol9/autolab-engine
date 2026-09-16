@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import re
 from dataclasses import dataclass, field
 
@@ -59,6 +60,28 @@ def validate_output_name(value: object) -> str:
     return text
 
 
+def validate_thresholds(values: dict[str, float] | None) -> dict[str, float]:
+    merged = dict(DEFAULT_THRESHOLDS)
+    if values:
+        unknown = set(values) - set(DEFAULT_THRESHOLDS)
+        if unknown:
+            raise ValueError(f"未知 thresholds: {sorted(unknown)}")
+        merged.update(values)
+    for name, raw in merged.items():
+        try:
+            value = float(raw)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"thresholds.{name} 须为数字") from exc
+        if not math.isfinite(value) or value < 0:
+            raise ValueError(f"thresholds.{name} 须为非负有限数")
+        if name in {"dark_brightness_lt", "odd_aspect_ratio_lt"} and value > 1:
+            raise ValueError(f"thresholds.{name} 须位于 [0, 1]")
+        if name == "odd_size_lt" and value <= 0:
+            raise ValueError("thresholds.odd_size_lt 须大于 0")
+        merged[name] = value
+    return merged
+
+
 @dataclass
 class DataCleanConfig:
     """数据清洗流水线配置；阈值与目录名可按数据集覆盖。"""
@@ -77,6 +100,14 @@ class DataCleanConfig:
 
     def __post_init__(self) -> None:
         self.output_name = validate_output_name(self.output_name)
+        self.thresholds = validate_thresholds(self.thresholds)
+        if self.enabled_filters is not None:
+            unknown = set(self.enabled_filters) - set(FILTER_NAMES)
+            if unknown:
+                raise ValueError(
+                    f"未知 enabledFilters: {sorted(unknown)}；可选: {list(FILTER_NAMES)}"
+                )
+            self.enabled_filters = frozenset(self.enabled_filters)
 
     def is_filter_enabled(self, name: str) -> bool:
         enabled = self.enabled_filters if self.enabled_filters is not None else DEFAULT_ENABLED_FILTERS
@@ -94,22 +125,11 @@ class DataCleanConfig:
         enabled_filters: list[str] | None = None,
     ) -> DataCleanConfig:
         """由 HTTP / Java 传入的可选字段构建配置；未传项保持默认。"""
-        cfg = cls()
-        if output_name is not None:
-            cfg.output_name = validate_output_name(output_name)
-        if overwrite is not None:
-            cfg.overwrite = overwrite
-        if skip_cleanvision is not None:
-            cfg.skip_cleanvision = skip_cleanvision
-        if require_cleanvision is not None:
-            cfg.require_cleanvision = require_cleanvision
-        if thresholds:
-            merged = dict(DEFAULT_THRESHOLDS)
-            merged.update(thresholds)
-            cfg.thresholds = merged
-        if enabled_filters is not None:
-            unknown = set(enabled_filters) - set(FILTER_NAMES)
-            if unknown:
-                raise ValueError(f"未知 enabledFilters: {sorted(unknown)}；可选: {list(FILTER_NAMES)}")
-            cfg.enabled_filters = frozenset(enabled_filters)
-        return cfg
+        return cls(
+            output_name=output_name if output_name is not None else "clean_output",
+            overwrite=overwrite if overwrite is not None else True,
+            skip_cleanvision=skip_cleanvision if skip_cleanvision is not None else False,
+            require_cleanvision=require_cleanvision if require_cleanvision is not None else True,
+            thresholds=thresholds or {},
+            enabled_filters=frozenset(enabled_filters) if enabled_filters is not None else None,
+        )

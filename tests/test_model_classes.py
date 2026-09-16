@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -24,8 +26,10 @@ class ModelClassesContractTest(unittest.TestCase):
         config = ModelConfig(key="helmet", name="helmet", task="detect", path="model.pt")
         engine = YoloDetectEngine(config)
         engine.model = SimpleNamespace(names={0: "head_with_helmet"})
-        with patch.object(inference, "get_model_config", return_value=config), patch.object(
-            inference, "ensure_model_engine", return_value=engine
+        with patch.object(
+            inference.MODEL_RUNTIME, "get_model_config", return_value=config
+        ), patch.object(
+            inference.MODEL_RUNTIME, "load", return_value=engine
         ):
             response = inference.load_model("helmet")
 

@@ -8,7 +8,7 @@ kek_id_file_name: "kek_id.txt"
 
 enc_suffix: "_enc"
 encrypted_mark: "encrypted"
-crypto_version: 2
+crypto_version: 3
 
 exclude_dirs:
   - demo

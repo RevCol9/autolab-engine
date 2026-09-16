@@ -11,10 +11,11 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, Optional
 
-from training.settings import resolve_training_device
+from shared.device import is_cuda_device
 from shared.gpu_lock import GpuDeviceLock
 from training.paths import train_save_dir
 from training.progress import read_job_progress
+from training.settings import resolve_training_device
 from training.trainer import collect_train_result, kill_process_group, popen_train
 
 logger = logging.getLogger(__name__)
@@ -24,7 +25,7 @@ logger = logging.getLogger(__name__)
 class TrainJob:
     job_id: str
     param: Dict[str, Any]
-    status: str = "pending"  # pending|running|finished|failed|stopped
+    status: str = "pending"  # pending|running|stopping|finished|failed|stopped
     error: Optional[str] = None
     result: Optional[Dict[str, Any]] = None
     pid: Optional[int] = None
@@ -78,7 +79,7 @@ class JobManager:
 
     def _reap_if_exited(self) -> None:
         job = self._job
-        if job is None or job.status != "running" or job._proc is None:
+        if job is None or job.status not in {"running", "stopping"} or job._proc is None:
             return
         code = job._proc.poll()
         if code is None:
@@ -94,7 +95,7 @@ class JobManager:
             return False
         if job.status == "pending":
             return True
-        if job.status == "running":
+        if job.status in {"running", "stopping"}:
             if job._proc is not None and job._proc.poll() is not None:
                 return False
             return True
@@ -124,14 +125,15 @@ class JobManager:
             )
             self._job = job
 
-        gpu_lock = GpuDeviceLock(job.device)
-        if not gpu_lock.acquire(blocking=False):
-            with self._lock:
-                job.status = "failed"
-                job.error = "GPU 正被推理占用，无法启动训练"
-                job.finished_at = time.time()
-            raise RuntimeError("GPU 正被推理占用，无法启动训练")
-        job._gpu_lock = gpu_lock
+        if is_cuda_device(job.device):
+            gpu_lock = GpuDeviceLock(job.device)
+            if not gpu_lock.acquire(blocking=False):
+                with self._lock:
+                    job.status = "failed"
+                    job.error = "GPU 正被推理占用，无法启动训练"
+                    job.finished_at = time.time()
+                raise RuntimeError("GPU 正被推理占用，无法启动训练")
+            job._gpu_lock = gpu_lock
 
         try:
             proc = popen_train(param, task=task, device=job.device)
@@ -155,12 +157,21 @@ class JobManager:
                 job._proc = proc
 
         if kill_after_start:
-            kill_process_group(proc)
-            self._release_gpu_lock(job)
+            terminated = kill_process_group(proc)
             with self._lock:
                 job.pid = proc.pid
                 job._proc = proc
-                job.finished_at = time.time()
+                if terminated:
+                    job.finished_at = time.time()
+                    self._release_gpu_lock(job)
+                else:
+                    job.status = "stopping"
+                    job.error = "训练进程终止超时；继续持有 GPU 锁并等待进程退出"
+                    threading.Thread(
+                        target=self._wait_for_proc,
+                        args=(job, proc, param),
+                        daemon=True,
+                    ).start()
             return self._snapshot(job)
 
         threading.Thread(target=self._wait_for_proc, args=(job, proc, param), daemon=True).start()
@@ -179,21 +190,36 @@ class JobManager:
                 return {"stopped": True, "job_id": job.job_id, "pid": job.pid, "job": self._snapshot(job)}
 
             if job.status != "running":
-                return {"stopped": False, "message": "无运行中的训练任务", "job": self._snapshot(job)}
+                message = "训练任务正在停止" if job.status == "stopping" else "无运行中的训练任务"
+                return {"stopped": False, "message": message, "job": self._snapshot(job)}
 
             proc = job._proc
-            job.status = "stopped"
-            job.finished_at = time.time()
+            job.status = "stopping"
             pid = job.pid
-            snapshot = self._snapshot(job)
 
+        terminated = proc is None
         if proc is not None:
             try:
-                kill_process_group(proc)
+                terminated = kill_process_group(proc)
             except Exception as exc:
                 logger.warning("stop train failed: %s", exc)
-        self._release_gpu_lock(job)
-        return {"stopped": True, "job_id": job.job_id, "pid": pid, "job": snapshot}
+                terminated = proc.poll() is not None
+
+        with self._lock:
+            if terminated:
+                job.status = "stopped"
+                job.finished_at = time.time()
+                self._release_gpu_lock(job)
+            else:
+                job.error = "训练进程终止超时；继续持有 GPU 锁并等待进程退出"
+            snapshot = self._snapshot(job)
+        return {
+            "stopped": terminated,
+            "job_id": job.job_id,
+            "pid": pid,
+            "message": None if terminated else job.error,
+            "job": snapshot,
+        }
 
     def _wait_for_proc(self, job: TrainJob, proc: Any, param: Dict[str, Any]) -> None:
         code = proc.wait()
@@ -204,7 +230,8 @@ class JobManager:
     def _complete_job(self, job: TrainJob, code: int, *, param: Optional[Dict[str, Any]] = None) -> None:
         if job.finished_at is None:
             job.finished_at = time.time()
-        if job.status == "stopped":
+        if job.status in {"stopped", "stopping"}:
+            job.status = "stopped"
             return
         if code != 0:
             job.status = "failed"

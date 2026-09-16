@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from collections import defaultdict
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -15,6 +16,8 @@ from toolkit.data_clean.discovery import (
 )
 from toolkit.data_clean.export import export_dataset
 from toolkit.data_clean.filters import apply_cleanvision_filters, validate_labels
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -76,18 +79,21 @@ class DataCleaner:
             Path(data_root),
             self.config,
         )
-        print(f"DATA_ROOT: {data_root}")
-        print(f"image_dir: {image_dir}")
-        print(f"label_dir: {label_dir if label_dir else 'not found; will check labels under image_dir'}")
-        print(f"output_root: {output_root}")
+        logger.info("DATA_ROOT: %s", data_root)
+        logger.info("image_dir: %s", image_dir)
+        logger.info(
+            "label_dir: %s",
+            label_dir if label_dir else "not found; will check labels under image_dir",
+        )
+        logger.info("output_root: %s", output_root)
 
         image_index = collect_image_index(image_dir, output_root, self.config)
         label_candidates = collect_label_candidates(image_dir, label_dir, output_root, self.config)
         active_keys = set(image_index)
         removal_reasons: Dict[str, List[str]] = defaultdict(list)
 
-        print(f"Images found: {len(image_index)}")
-        print(f"Label bases found: {len(label_candidates)}")
+        logger.info("Images found: %s", len(image_index))
+        logger.info("Label bases found: %s", len(label_candidates))
 
         if not self.config.skip_cleanvision:
             apply_cleanvision_filters(

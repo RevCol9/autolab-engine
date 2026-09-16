@@ -11,7 +11,7 @@ from typing import Any, Dict, Optional
 
 from training.hparams import write_job_train_config
 from training.paths import CLOSED_LOOP_TRAIN_SCRIPT, YOLO_PYTHON, train_save_dir
-from training.run_artifacts import reset_run_artifacts
+from training.run_artifacts import TRAINING_METRICS_CSV, reset_run_artifacts
 
 logger = logging.getLogger(__name__)
 
@@ -42,7 +42,7 @@ def collect_train_result(save_dir: Path) -> Dict[str, Any]:
         "save_dir": str(save_dir),
         "config": str(config_path) if config_path.is_file() else None,
         "report": str(save_dir / "report.json"),
-        "csv": str(save_dir / "trainning_data.csv"),
+        "csv": str(save_dir / TRAINING_METRICS_CSV),
         "log": str(save_dir / "train.log"),
     }
 
@@ -80,32 +80,42 @@ def popen_detection_train(
 ) -> subprocess.Popen:
     return popen_train(param, task="detection", device=device, cwd=cwd)
 
-def kill_process_group(proc: subprocess.Popen, timeout: float = 15.0) -> None:
+def kill_process_group(proc: subprocess.Popen, timeout: float = 15.0) -> bool:
+    """终止子进程组；仅在确认进程已退出后返回 True。"""
     pid = proc.pid
     if pid is None:
-        return
+        return proc.poll() is not None
     try:
         os.killpg(pid, signal.SIGTERM)
     except ProcessLookupError:
-        return
-    except Exception:
+        return proc.poll() is not None
+    except Exception as exc:
+        logger.debug("killpg SIGTERM failed pid=%s: %s", pid, exc)
         try:
             proc.send_signal(signal.SIGTERM)
-        except Exception:
-            pass
+        except Exception as fallback_exc:
+            logger.warning("send SIGTERM failed pid=%s: %s", pid, fallback_exc)
     try:
         proc.wait(timeout=timeout)
-        return
-    except Exception:
-        pass
+        return True
+    except subprocess.TimeoutExpired:
+        logger.warning("SIGTERM timed out pid=%s; escalating to SIGKILL", pid)
+    except Exception as exc:
+        logger.warning("wait after SIGTERM failed pid=%s: %s", pid, exc)
     try:
         os.killpg(pid, signal.SIGKILL)
-    except Exception:
+    except ProcessLookupError:
+        return proc.poll() is not None
+    except Exception as exc:
+        logger.debug("killpg SIGKILL failed pid=%s: %s", pid, exc)
         try:
             proc.kill()
-        except Exception:
-            pass
+        except Exception as fallback_exc:
+            logger.warning("process kill failed pid=%s: %s", pid, fallback_exc)
     try:
         proc.wait(timeout=5)
-    except Exception:
+    except subprocess.TimeoutExpired:
         logger.warning("kill process group timed out pid=%s", pid)
+    except Exception as exc:
+        logger.warning("final wait failed pid=%s: %s", pid, exc)
+    return proc.poll() is not None

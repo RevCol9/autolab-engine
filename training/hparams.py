@@ -9,7 +9,7 @@ from typing import Any, Dict, Mapping, Optional
 import yaml
 
 from training.backends import get_backend
-from training.data_yaml import prepare_data_yaml_for_job
+from training.dataset import TrainingDataset
 from training.paths import baseline_pt_from_last_train, train_save_dir
 from training.settings import resolve_training_device, training_ultralytics_defaults
 
@@ -89,13 +89,12 @@ def build_job_train_config(
     device: Optional[str] = None,
 ) -> Dict[str, Any]:
     backend = get_backend(task)
-    backend.validate_job(param)
 
     project_id = str(param["projectId"])
     task_id = str(param["taskId"])
     train_num = str(param["trainNum"])
 
-    data_yaml = prepare_data_yaml_for_job(dict(param))
+    data_yaml = TrainingDataset.from_job(param).prepare(task=task)
     save_path = train_save_dir(project_id, task_id, train_num)
     save_path.mkdir(parents=True, exist_ok=True)
 

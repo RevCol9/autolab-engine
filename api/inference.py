@@ -23,24 +23,15 @@ from annotation.predict_core import (
     parse_image,
     parse_image_ids,
     run_predict_locked,
+    validate_predict_options,
 )
 from annotation.registry import (
     BATCH_MAX_IMAGES,
     GPU_LOAD_TIMEOUT,
-    _engines,
-    _gpu_lock,
-    active_key,
-    cross_gpu_session,
-    ensure_model_engine,
-    get_model_config,
-    is_vlm_engine,
-    set_active_key,
+    MODEL_RUNTIME,
 )
-from annotation.test_ui import test_page
+from annotation.dev_ui import test_page
 from shared.openapi_docs import openapi_description
-
-# 供测试与外部脚本复用
-from annotation.registry import ensure_model_engine, get_model_config  # noqa: F401
 
 logger = logging.getLogger(__name__)
 
@@ -60,12 +51,10 @@ app.add_middleware(
 
 @app.on_event("startup")
 def on_startup() -> None:
-    default = get_model_config(None)
-    if default.path and not is_vlm_engine(default):
+    default = MODEL_RUNTIME.get_model_config(None)
+    if default.path and not default.is_vlm:
         try:
-            with _gpu_lock:
-                with cross_gpu_session(default, timeout=GPU_LOAD_TIMEOUT):
-                    ensure_model_engine(default.key)
+            MODEL_RUNTIME.load(default.key, timeout=GPU_LOAD_TIMEOUT)
         except HTTPException as exc:
             logger.warning("startup skip load default=%s: %s", default.key, exc.detail)
         except Exception as exc:
@@ -83,17 +72,19 @@ def health() -> dict:
     cuda = runtime_state.probe_cuda()
     weight = runtime_state.probe_default_weight(SETTINGS)
     gpu_locks = runtime_state.probe_gpu_locks(SETTINGS)
-    degraded = not cuda.get("available") or not weight.get("ok")
+    cuda_required = any(model.requires_cuda for model in SETTINGS.models)
+    degraded = (cuda_required and not cuda.get("available")) or not weight.get("ok")
+    loaded = MODEL_RUNTIME.loaded_keys()
     return {
         "status": "degraded" if degraded else "ok",
         "default_model": SETTINGS.default_model,
-        "active_model": active_key(),
-        "loaded": list(_engines.keys()),
+        "active_model": MODEL_RUNTIME.active_key(),
+        "loaded": list(loaded),
         "cuda": cuda,
         "default_weight": weight,
         "gpu_locks": gpu_locks,
         "models": [
-            runtime_state.model_entry(m, loaded=m.key in _engines)
+            runtime_state.model_entry(m, loaded=m.key in loaded)
             for m in SETTINGS.models
         ],
     }
@@ -102,13 +93,14 @@ def health() -> dict:
 @app.get("/api/models")
 def models() -> dict:
     """返回 config.yaml 中的模型清单（不暴露权重绝对路径）。"""
+    loaded = MODEL_RUNTIME.loaded_keys()
     return {
         "default_model": SETTINGS.default_model,
-        "loaded": list(_engines.keys()),
+        "loaded": list(loaded),
         "box_formats": list(SUPPORTED_BOX_FORMATS),
         "mask_formats": list(SUPPORTED_MASK_FORMATS),
         "models": [
-            runtime_state.model_entry(m, loaded=m.key in _engines)
+            runtime_state.model_entry(m, loaded=m.key in loaded)
             for m in SETTINGS.models
         ],
     }
@@ -117,26 +109,22 @@ def models() -> dict:
 @app.get("/api/models/{model_key}/classes")
 def model_classes(model_key: str) -> dict:
     """返回已加载或按需加载后的类别列表。"""
-    cfg = get_model_config(model_key)
-    with _gpu_lock:
-        with cross_gpu_session(cfg, timeout=GPU_LOAD_TIMEOUT):
-            engine = ensure_model_engine(cfg.key)
-            return {
-                "model_key": cfg.key,
-                "classes": engine.classes(),
-                "loaded": list(_engines.keys()),
-            }
+    cfg = MODEL_RUNTIME.get_model_config(model_key)
+    engine = MODEL_RUNTIME.load(cfg.key, timeout=GPU_LOAD_TIMEOUT)
+    return {
+        "model_key": cfg.key,
+        "classes": engine.classes(),
+        "loaded": list(MODEL_RUNTIME.loaded_keys()),
+    }
 
 
 @app.post("/api/models/{model_key}/load")
 def load_model(model_key: str) -> dict:
     """显式将指定模型加载到 GPU。"""
     t0 = time.perf_counter()
-    cfg = get_model_config(model_key)
+    cfg = MODEL_RUNTIME.get_model_config(model_key)
     try:
-        with _gpu_lock:
-            with cross_gpu_session(cfg, timeout=GPU_LOAD_TIMEOUT):
-                engine = ensure_model_engine(cfg.key)
+        engine = MODEL_RUNTIME.load(cfg.key, timeout=GPU_LOAD_TIMEOUT)
     except HTTPException:
         raise
     except FileNotFoundError as exc:
@@ -154,7 +142,7 @@ def load_model(model_key: str) -> dict:
         "engine": cfg.engine,
         "device": cfg.device,
         "classes": engine.classes(),
-        "loaded": list(_engines.keys()),
+        "loaded": list(MODEL_RUNTIME.loaded_keys()),
         "timings": {"load": cost},
     }
 
@@ -162,34 +150,24 @@ def load_model(model_key: str) -> dict:
 @app.post("/api/models/{model_key}/unload")
 def unload_model(model_key: str) -> dict:
     """从 GPU 卸载指定模型，释放显存。"""
-    cfg = get_model_config(model_key)
-    with _gpu_lock:
-        if cfg.key not in _engines:
-            return {
-                "status": "ok",
-                "model_key": cfg.key,
-                "unloaded": False,
-                "message": "模型未在内存中",
-                "loaded": list(_engines.keys()),
-            }
-        loaded, new_active = runtime_state.unload_engine(cfg.key, _engines, active_key())
-        set_active_key(new_active)
-    return {
+    cfg = MODEL_RUNTIME.get_model_config(model_key)
+    outcome = MODEL_RUNTIME.unload(cfg.key)
+    response = {
         "status": "ok",
         "model_key": cfg.key,
-        "unloaded": True,
-        "loaded": loaded,
-        "active_model": active_key(),
+        "unloaded": outcome.unloaded,
+        "loaded": list(outcome.loaded),
+        "active_model": outcome.active_key,
     }
+    if not outcome.unloaded:
+        response["message"] = "模型未在内存中"
+    return response
 
 
 @app.post("/api/models/unload_all")
 def unload_all_models() -> dict:
     """卸载所有已加载模型。"""
-    with _gpu_lock:
-        count = len(_engines)
-        runtime_state.unload_all_engines(_engines)
-        set_active_key(None)
+    count = MODEL_RUNTIME.unload_all()
     return {"status": "ok", "unloaded_count": count, "loaded": []}
 
 
@@ -211,12 +189,18 @@ async def predict(
 ) -> dict:
     """单图推理。YOLO、LocateAnything 或 SAM3（同进程加载）。"""
     t0 = time.perf_counter()
+    validate_predict_options(
+        conf=conf,
+        iou=iou,
+        imgsz=imgsz,
+        sam3_threshold=sam3_threshold,
+    )
     fmt = normalize_box_format(box_format)
     mfmt = normalize_mask_format(mask_format)
     raw = await image.read()
     filename = getattr(image, "filename", None) or "-"
     img = parse_image(raw, filename)
-    cfg = get_model_config(model_key)
+    cfg = MODEL_RUNTIME.get_model_config(model_key)
     logger.debug(
         "predict %s | %s | %sx%s | fmt=%s",
         cfg.key,
@@ -286,7 +270,7 @@ async def predict_segment(
     sam3_boxes: Optional[str] = Form(None),
 ) -> dict:
     """分割专用：YOLO instance segment 或 SAM3（文本/正负点/框提示）。"""
-    cfg = get_model_config(model_key)
+    cfg = MODEL_RUNTIME.get_model_config(model_key)
     eng = (cfg.engine or "yolo").lower()
     task_cfg = (cfg.task or "").lower()
     if eng not in {"sam3"} and task_cfg != "segment":
@@ -334,6 +318,7 @@ async def predict_batch(
 ) -> dict:
     """批量推理。同一 model_key；单次最多 BATCH_MAX_IMAGES 张。"""
     t0 = time.perf_counter()
+    validate_predict_options(conf=conf, iou=iou, imgsz=imgsz)
     fmt = normalize_box_format(box_format)
     mfmt = normalize_mask_format(mask_format)
     n = len(images)
@@ -346,8 +331,8 @@ async def predict_batch(
         )
 
     ids = parse_image_ids(image_ids, n)
-    cfg = get_model_config(model_key)
-    if is_vlm_engine(cfg):
+    cfg = MODEL_RUNTIME.get_model_config(model_key)
+    if cfg.is_vlm:
         raise HTTPException(
             status_code=400,
             detail=f"模型 {cfg.key} 为 Locate/SAM3，请用单图 /api/predict 或 /api/predict/segment",
@@ -355,9 +340,7 @@ async def predict_batch(
     logger.debug("batch %s | n=%s | fmt=%s", cfg.key, n, fmt)
 
     try:
-        with _gpu_lock:
-            with cross_gpu_session(cfg, timeout=GPU_LOAD_TIMEOUT):
-                ensure_model_engine(cfg.key)
+        MODEL_RUNTIME.load(cfg.key, timeout=GPU_LOAD_TIMEOUT)
     except HTTPException as exc:
         raise exc
     except FileNotFoundError as exc:

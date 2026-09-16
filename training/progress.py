@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from training.paths import train_save_dir
+from training.run_artifacts import TRAINING_METRICS_CSV
 
 
 def _read_csv_rows(csv_path: Path) -> List[Dict[str, str]]:
@@ -70,7 +71,7 @@ def read_job_progress(
 ) -> Dict[str, Any]:
     """读取任务目录下 CSV 最新 epoch；训练尚未写盘时返回空进度。"""
     save_dir = train_save_dir(project_id, task_id, train_num)
-    csv_path = save_dir / "trainning_data.csv"
+    csv_path = save_dir / TRAINING_METRICS_CSV
     log_path = save_dir / "train.log"
     rows = _read_csv_rows(csv_path)
     latest = parse_epoch_row(rows[-1]) if rows else None

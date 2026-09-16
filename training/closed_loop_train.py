@@ -19,6 +19,7 @@ from training.reporting import (
     write_json,
 )
 from training.resource_sampler import ResourceSampler, capture_resource_snapshot
+from training.run_artifacts import TRAINING_METRICS_CSV
 
 
 def parse_args():
@@ -36,7 +37,7 @@ def main():
     model_path = str(config.pop("model"))
     data_path = str(config.pop("data"))
     save_dir.mkdir(parents=True, exist_ok=True)
-    csv_path = save_dir / "trainning_data.csv"
+    csv_path = save_dir / TRAINING_METRICS_CSV
     process_start = time.time()
     train_start = process_start
     sampler = None

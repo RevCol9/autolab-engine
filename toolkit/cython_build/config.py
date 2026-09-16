@@ -70,7 +70,7 @@ class CythonBuildConfig:
                 "run.py",
                 "training/run.py",
             ),
-            never_compile_extra=frozenset({"test_model_classes.py"}),
+            never_compile_extra=frozenset(),
             config_files=(
                 "config/annotation.example.yaml",
                 "config/training/base.example.yaml",

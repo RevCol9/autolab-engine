@@ -7,7 +7,7 @@ import json
 from datetime import datetime
 from pathlib import Path
 
-from ultralytics import YOLO
+from training.run_artifacts import TRAINING_METRICS_CSV
 
 METRIC_ALIASES = {
     "precision": ["precision", "metrics/precision(B)", "metrics/precision", "mp", "P"],
@@ -23,6 +23,8 @@ METRIC_ALIASES = {
 
 
 def evaluate_model(model_path, data, batch, imgsz, device, project_dir, run_name):
+    from ultralytics import YOLO
+
     result = {
         "modelPath": str(model_path),
         "runDir": str(Path(project_dir) / run_name),
@@ -122,7 +124,7 @@ def compare_metrics(before, after):
 
 def collect_artifacts(save_dir):
     names = [
-        "trainning_data.csv",
+        TRAINING_METRICS_CSV,
         "train_config.yaml",
         "results.csv",
         "results.png",

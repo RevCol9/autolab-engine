@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Dict, Iterable, List, Sequence, Set
 
 from toolkit.data_clean.config import DataCleanConfig
 from toolkit.data_clean.discovery import LabelCandidate, resolve_image_key
 from toolkit.data_clean.paths import image_base_key
+
+logger = logging.getLogger(__name__)
 
 
 def add_reason(removal_reasons: Dict[str, List[str]], key: str, reason: str) -> None:
@@ -27,17 +30,22 @@ def remove_keys(
             active_keys.remove(key)
             add_reason(removal_reasons, key, reason)
             removed += 1
-    print(f"{reason}: removed={removed}, saved_left={len(active_keys)}")
+    logger.info("%s: removed=%s, saved_left=%s", reason, removed, len(active_keys))
     return removed
 
 
 def issue_index(imagelab, issue_name: str, column: str, threshold: float, op: str = "lt") -> List[object]:
     frame = imagelab.info.get(issue_name)
     if frame is None:
-        print(f"Skip {issue_name}: CleanVision did not return this issue type")
+        logger.info("Skip %s: CleanVision did not return this issue type", issue_name)
         return []
     if column not in frame.columns:
-        print(f"Skip {issue_name}: missing column {column!r}; columns={list(frame.columns)}")
+        logger.info(
+            "Skip %s: missing column %r; columns=%s",
+            issue_name,
+            column,
+            list(frame.columns),
+        )
         return []
     if op == "lt":
         return list(frame[frame[column] < threshold].index)
@@ -65,7 +73,7 @@ def remove_from_cleanvision_index(
             keys.append(key)
     removed = remove_keys(active_keys, removal_reasons, keys, reason)
     if unmatched:
-        print(f"{reason}: unmatched={len(unmatched)}, examples={unmatched[:5]}")
+        logger.warning("%s: unmatched=%s, examples=%s", reason, len(unmatched), unmatched[:5])
     return removed
 
 
@@ -109,7 +117,13 @@ def remove_duplicate_sets(
             active_keys.remove(key)
             add_reason(removal_reasons, key, f"{reason}; kept={keep}")
             removed += 1
-    print(f"{reason}: removed={removed}, unmatched={unmatched}, saved_left={len(active_keys)}")
+    logger.info(
+        "%s: removed=%s, unmatched=%s, saved_left=%s",
+        reason,
+        removed,
+        unmatched,
+        len(active_keys),
+    )
     return removed
 
 
@@ -126,17 +140,17 @@ def apply_cleanvision_filters(
         message = "cleanvision is not installed; skip image-quality filters."
         if config.require_cleanvision:
             raise ValueError(message)
-        print(message)
+        logger.warning("%s", message)
         return
 
     thresholds = config.thresholds
     imagelab = Imagelab(data_path=str(image_dir))
     imagelab.find_issues()
-    print("CleanVision issue keys:", list(imagelab.info.keys()))
+    logger.info("CleanVision issue keys: %s", list(imagelab.info.keys()))
     try:
-        print(imagelab.issue_summary)
-    except Exception:
-        pass
+        logger.debug("CleanVision issue summary:\n%s", imagelab.issue_summary)
+    except Exception as exc:
+        logger.debug("CleanVision issue summary unavailable: %s", exc)
 
     checks = [
         ("dark", "dark", "brightness", thresholds["dark_brightness_lt"], "dark:brightness<"),
