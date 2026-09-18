@@ -1,6 +1,6 @@
 # 闭环训练环境（建议 mamba env: yolo，与 NIII_YOLO_PYTHON 一致）
 
-ultralytics>=8.3.0,<8.4
+ultralytics==8.4.96
 PyYAML>=6.0
 opencv-python-headless>=4.8
 numpy>=1.24
@@ -14,5 +14,5 @@ fastapi>=0.110
 uvicorn[standard]>=0.27
 pydantic>=2.0
 
-# GPU 版 torch 请按 CUDA 驱动单独安装，例如：
+# GPU 版 torch 请按 CUDA 驱动单独安装；加密模型加载要求 torch>=2.1，例如：
 # pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124

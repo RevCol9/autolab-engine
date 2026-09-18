@@ -24,6 +24,7 @@ from toolkit.model_crypto.core import (
 )
 from toolkit.model_crypto.envelope import load_kek, unwrap_dek, wrap_dek
 from toolkit.model_crypto.loader import load_yolo, resolve_weight_path
+from toolkit.model_crypto.runtime import load_yolo_container
 
 __all__ = [
     "CRYPTO_VERSION",
@@ -43,6 +44,7 @@ __all__ = [
     "is_yolo_checkpoint",
     "load_kek",
     "load_yolo",
+    "load_yolo_container",
     "read_model_container",
     "resolve_weight_path",
     "restore_plain_weights_from_enc",
