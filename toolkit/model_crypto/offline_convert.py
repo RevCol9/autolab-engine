@@ -1,4 +1,4 @@
-"""Trusted build-host conversion from legacy PyTorch checkpoints to .niii-model."""
+"""Trusted build-host conversion from PyTorch checkpoints to `.niii-model`."""
 
 from __future__ import annotations
 

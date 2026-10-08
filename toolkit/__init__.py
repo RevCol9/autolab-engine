@@ -2,12 +2,12 @@
 autolab-engine 可插拔工具集。
 
 子模块：
-- ``toolkit.model_crypto``：YOLO 权重 AES 加密与内存加载
+- ``toolkit.model_crypto``：`.niii-model` 容器与受控 YOLO 加载
 - ``toolkit.cython_build``：Cython 编译与 develop 部署目录同步
 
 嵌入示例::
 
-    from toolkit.model_crypto import load_yolo
+    from toolkit.model_crypto import load_yolo_container
     from toolkit.cython_build import CythonBuildConfig, CythonBuilder
 """
 
@@ -19,24 +19,22 @@ __all__ = [
     "CythonBuildConfig",
     "CythonBuilder",
     "ModelCryptoConfig",
-    "ModelDecryptor",
-    "encrypt_all_weights",
-    "encrypt_weights",
-    "is_encrypted_checkpoint",
-    "load_yolo",
-    "resolve_weight_path",
+    "create_yolo_architecture",
+    "init_kek",
+    "load_yolo_container",
+    "read_model_container",
+    "write_model_container",
 ]
 
 _LAZY_EXPORTS = {
     "CythonBuildConfig": ("toolkit.cython_build", "CythonBuildConfig"),
     "CythonBuilder": ("toolkit.cython_build", "CythonBuilder"),
     "ModelCryptoConfig": ("toolkit.model_crypto", "ModelCryptoConfig"),
-    "ModelDecryptor": ("toolkit.model_crypto", "ModelDecryptor"),
-    "encrypt_all_weights": ("toolkit.model_crypto", "encrypt_all_weights"),
-    "encrypt_weights": ("toolkit.model_crypto", "encrypt_weights"),
-    "is_encrypted_checkpoint": ("toolkit.model_crypto", "is_encrypted_checkpoint"),
-    "load_yolo": ("toolkit.model_crypto", "load_yolo"),
-    "resolve_weight_path": ("toolkit.model_crypto", "resolve_weight_path"),
+    "create_yolo_architecture": ("toolkit.model_crypto", "create_yolo_architecture"),
+    "init_kek": ("toolkit.model_crypto", "init_kek"),
+    "load_yolo_container": ("toolkit.model_crypto", "load_yolo_container"),
+    "read_model_container": ("toolkit.model_crypto", "read_model_container"),
+    "write_model_container": ("toolkit.model_crypto", "write_model_container"),
 }
 
 
@@ -56,10 +54,9 @@ if TYPE_CHECKING:
     from toolkit.cython_build import CythonBuildConfig, CythonBuilder
     from toolkit.model_crypto import (
         ModelCryptoConfig,
-        ModelDecryptor,
-        encrypt_all_weights,
-        encrypt_weights,
-        is_encrypted_checkpoint,
-        load_yolo,
-        resolve_weight_path,
+        create_yolo_architecture,
+        init_kek,
+        load_yolo_container,
+        read_model_container,
+        write_model_container,
     )

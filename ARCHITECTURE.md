@@ -16,7 +16,7 @@
 `TRAINING_CONFIG_PATH` 所指 YAML 必须声明 `train_task`，避免检测和分割配置串用；
 任务由路由选择，不使用全局 `TRAINING_TASK`。API 传入 `pretrained_model_path` 时，
 仅从 `NIII_TRAINING_MODEL_ROOTS` 允许的共享目录解析 `.niii-model` 权重；生产训练和
-YOLO 推理入口不接受 `.pt`、ONNX 或旧 `*_enc.pt`。
+YOLO 推理入口只支持该容器格式。
 
 ## 配置目录
 

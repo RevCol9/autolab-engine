@@ -7,19 +7,12 @@ import binascii
 import os
 import secrets
 from pathlib import Path
-from typing import Any
-
-from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-
 from toolkit.model_crypto.config import (
     ENV_MODEL_KEK,
     ENV_MODEL_KEK_ID,
-    KEK_WRAP_ALG,
     ModelCryptoConfig,
     default_model_crypto_config,
 )
-
-_ENVELOPE_AAD = b"niii-model-crypto-envelope-v3"
 
 
 def _cfg(config: ModelCryptoConfig | None) -> ModelCryptoConfig:
@@ -155,35 +148,3 @@ def init_kek(
     except OSError:
         pass
     return kek_path, kid
-
-
-def wrap_dek(kek: bytes, dek: bytes, *, kek_id: str) -> dict[str, Any]:
-    """KEK 封装 DEK，结果写入 checkpoint.envelope。"""
-    if len(kek) != 32 or len(dek) != 32:
-        raise ValueError("KEK/DEK 均须为 32 字节")
-    nonce = secrets.token_bytes(12)
-    packed = AESGCM(kek).encrypt(nonce, dek, _ENVELOPE_AAD)
-    return {
-        "alg": KEK_WRAP_ALG,
-        "kek_id": kek_id,
-        "nonce": nonce,
-        "aad": _ENVELOPE_AAD,
-        "dek_wrapped": packed[:-16],
-        "tag": packed[-16:],
-    }
-
-
-def unwrap_dek(kek: bytes, envelope: dict[str, Any]) -> bytes:
-    """从 envelope 解出 DEK；认证失败视为密钥错误或密文损坏。"""
-    if not envelope:
-        raise ValueError("缺少 envelope")
-    alg = envelope.get("alg") or KEK_WRAP_ALG
-    if alg != KEK_WRAP_ALG:
-        raise ValueError(f"不支持的 envelope 算法: {alg}")
-    nonce = bytes(envelope["nonce"])
-    wrapped = bytes(envelope["dek_wrapped"]) + bytes(envelope["tag"])
-    aad = bytes(envelope["aad"]) if "aad" in envelope else None
-    try:
-        return AESGCM(kek).decrypt(nonce, wrapped, aad)
-    except Exception as exc:
-        raise ValueError("无法解开 DEK：KEK 不匹配或 envelope 已损坏") from exc

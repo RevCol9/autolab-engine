@@ -59,7 +59,7 @@ class EncryptedInferenceMainChainTest(unittest.TestCase):
             self.assertEqual([], list(root.rglob("*.pt")))
 
     def test_yolo_configuration_rejects_plaintext_model_formats(self):
-        for path in ("model.pt", "model.onnx", "model_enc.pt"):
+        for path in ("model.pt", "model.onnx", "model.pth"):
             with self.subTest(path=path), self.assertRaisesRegex(ValueError, "niii-model"):
                 parse_models([{"key": "unsafe", "engine": "yolo", "path": path}])
 

@@ -1,9 +1,9 @@
-"""信封加密策略配置；非密钥材料统一由 YAML 维护。"""
+"""`.niii-model` 密钥位置配置；密钥材料本身不得写入 YAML。"""
 
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -14,63 +14,23 @@ ENV_MODEL_KEK_ID = "NIII_MODEL_KEK_ID"
 ENV_MODEL_KEYS_DIR = "NIII_MODEL_KEYS_DIR"
 ENV_MODEL_CRYPTO_CONFIG = "NIII_MODEL_CRYPTO_CONFIG"
 
-CRYPTO_VERSION = 3
-KEK_WRAP_ALG = "AES-256-GCM"
-
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _CONFIG_CANDIDATES = (
     _REPO_ROOT / "config" / "model_crypto.yaml",
     _REPO_ROOT / "config" / "model_crypto.example.yaml",
 )
-
-_DEFAULT_EXCLUDE = frozenset(
-    {
-        "demo",
-        "test",
-        "tests",
-        ".git",
-        "__pycache__",
-        "keys",
-        "develop",
-        "release",
-        "dist",
-        "build",
-        "toolkit",
-        ".venv",
-        "venv",
-    }
+_CONFIG_KEYS = frozenset(
+    {"keys_dir", "kek_id", "kek_file_name", "kek_id_file_name"}
 )
-
 
 @dataclass(frozen=True)
 class ModelCryptoConfig:
-    """加解密策略：路径约定、扫描规则、信封版本号。KEK 字节不进入本对象。"""
+    """KEK 文件位置与标识；KEK 字节不进入本对象。"""
 
     keys_dir: str | None = None
     kek_id: str = "default"
     kek_file_name: str = "kek.key"
     kek_id_file_name: str = "kek_id.txt"
-    encrypted_mark: str = "encrypted"
-    enc_suffix: str = "_enc"
-    crypto_version: int = CRYPTO_VERSION
-    exclude_dirs: frozenset[str] = field(default_factory=lambda: _DEFAULT_EXCLUDE)
-    weight_suffixes: frozenset[str] = field(
-        default_factory=lambda: frozenset({".pt", ".pth"})
-    )
-
-    @property
-    def default_kek_id(self) -> str:
-        return self.kek_id
-
-    def encrypted_path_for(self, src: Path) -> Path:
-        if src.stem.endswith(self.enc_suffix):
-            return src
-        return src.with_name(f"{src.stem}{self.enc_suffix}{src.suffix}")
-
-    def plain_path_for_enc(self, enc: Path) -> Path:
-        if not enc.stem.endswith(self.enc_suffix):
-            raise ValueError(f"不是加密后缀文件: {enc}")
-        return enc.with_name(f"{enc.stem[: -len(self.enc_suffix)]}{enc.suffix}")
 
     def resolved_keys_dir(self) -> Path | None:
         env_dir = os.environ.get(ENV_MODEL_KEYS_DIR, "").strip()
@@ -83,22 +43,14 @@ class ModelCryptoConfig:
     @classmethod
     def from_mapping(cls, data: dict[str, Any] | None) -> ModelCryptoConfig:
         raw = dict(data or {})
-        exclude = raw.get("exclude_dirs")
-        suffixes = raw.get("weight_suffixes")
+        unknown = sorted(set(raw) - _CONFIG_KEYS)
+        if unknown:
+            raise ValueError(f"模型加密配置包含不支持的字段: {unknown}")
         return cls(
             keys_dir=_optional_str(raw.get("keys_dir")),
             kek_id=str(raw.get("kek_id") or "default"),
             kek_file_name=str(raw.get("kek_file_name") or "kek.key"),
             kek_id_file_name=str(raw.get("kek_id_file_name") or "kek_id.txt"),
-            encrypted_mark=str(raw.get("encrypted_mark") or "encrypted"),
-            enc_suffix=str(raw.get("enc_suffix") or "_enc"),
-            crypto_version=int(raw.get("crypto_version") or CRYPTO_VERSION),
-            exclude_dirs=frozenset(str(x) for x in exclude) if exclude else _DEFAULT_EXCLUDE,
-            weight_suffixes=(
-                frozenset(str(x) if str(x).startswith(".") else f".{x}" for x in suffixes)
-                if suffixes
-                else frozenset({".pt", ".pth"})
-            ),
         )
 
     @classmethod
