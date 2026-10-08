@@ -235,6 +235,7 @@ def _run_validation(args: argparse.Namespace, report: dict[str, Any]) -> None:
         "memory": _cuda_memory(device),
         "result": _result_summary(prediction[0]),
     }
+    del prediction
 
     torch.cuda.reset_peak_memory_stats(device)
     torch.cuda.synchronize(device)
@@ -256,11 +257,22 @@ def _run_validation(args: argparse.Namespace, report: dict[str, Any]) -> None:
         "memory": _cuda_memory(device),
         "metrics": _to_json_value(getattr(baseline, "results_dict", {})),
     }
+    del baseline
 
     if not args.skip_training:
+        # Ultralytics predict/val fuse Conv+BN in place. Training must start from
+        # a fresh authenticated model or most unfused state_dict items are lost.
+        del model
+        torch.cuda.empty_cache()
+        training_model = load_yolo_container(
+            model_path,
+            device,
+            args.task,
+            key_dir=key_dir,
+        )
         torch.cuda.reset_peak_memory_stats(device)
         trainer = create_encrypted_trainer(
-            model.model,
+            training_model.model,
             task=_TASKS[args.task],
             key_dir=key_dir,
             overrides={
@@ -283,6 +295,8 @@ def _run_validation(args: argparse.Namespace, report: dict[str, Any]) -> None:
                 "verbose": False,
             },
         )
+        del training_model
+        torch.cuda.empty_cache()
         torch.cuda.synchronize(device)
         started = time.perf_counter()
         trainer.train()

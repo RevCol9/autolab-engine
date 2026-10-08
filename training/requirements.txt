@@ -1,6 +1,6 @@
 # 闭环训练环境（建议 mamba env: yolo，与 NIII_YOLO_PYTHON 一致）
 
-ultralytics==8.4.96
+ultralytics==8.4.113
 PyYAML>=6.0
 opencv-python-headless>=4.8
 numpy>=1.24

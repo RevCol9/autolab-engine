@@ -13,7 +13,7 @@ STORAGE_ROOT = Path(
     os.environ.get("NIII_TRAINING_STORAGE", "/niii_machine_version/AI_trainning_platform/storage")
 )
 
-# 闭环训练 subprocess 使用的 Python（mamba/venv，需装 ultralytics 8.3+）
+# 闭环训练 subprocess 使用的 Python（mamba/venv，需装 ultralytics 8.4.113）
 YOLO_PYTHON = os.environ.get(
     "NIII_YOLO_PYTHON", "/root/.local/share/mamba/envs/yolo/bin/python"
 )

@@ -51,6 +51,25 @@ def main():
     container_task = {"detection": "detect", "segmentation": "segment"}[train_task]
     allow_cpu_for_tests = os.environ.get("NIII_ALLOW_CPU_MODEL_TESTS") == "1"
 
+    def load_controlled_model():
+        if Path(model_path).suffix.lower() == ".niii-model":
+            return load_yolo_container(
+                model_path,
+                device,
+                container_task,
+                allow_cpu_for_tests=allow_cpu_for_tests,
+            )
+        if Path(model_path).suffix.lower() == ".yaml":
+            return create_yolo_architecture(
+                model_path,
+                device,
+                container_task,
+                allow_cpu_for_tests=allow_cpu_for_tests,
+            )
+        raise ValueError(
+            "训练 model 只接受受控架构 .yaml 或预训练 .niii-model"
+        )
+
     def on_fit_epoch_end(trainer):
         now = time.time()
         epoch = int(trainer.epoch) + 1
@@ -74,24 +93,7 @@ def main():
         write_csv(csv_path, row, state)
 
     try:
-        if Path(model_path).suffix.lower() == ".niii-model":
-            model = load_yolo_container(
-                model_path,
-                device,
-                container_task,
-                allow_cpu_for_tests=allow_cpu_for_tests,
-            )
-        elif Path(model_path).suffix.lower() == ".yaml":
-            model = create_yolo_architecture(
-                model_path,
-                device,
-                container_task,
-                allow_cpu_for_tests=allow_cpu_for_tests,
-            )
-        else:
-            raise ValueError(
-                "训练 model 只接受受控架构 .yaml 或预训练 .niii-model"
-            )
+        model = load_controlled_model()
         batch = int(config.get("batch", 4))
         imgsz = int(config.get("imgsz", 640))
         device = str(config.get("device", "0"))
@@ -108,6 +110,9 @@ def main():
         )
         if baseline_eval.get("error"):
             raise RuntimeError(f"加密训练基线评估失败: {baseline_eval['error']}")
+        # Ultralytics validation fuses Conv+BN in place. Reload authenticated
+        # weights so Trainer receives the complete, unfused state_dict.
+        model = load_controlled_model()
         train_start = time.time()
         state["epoch_start"] = train_start
         sampler = ResourceSampler(device=device).start()
@@ -118,6 +123,7 @@ def main():
             overrides={**config, "model": model_path, "data": data_path},
             allow_cpu_for_tests=allow_cpu_for_tests,
         )
+        del model
         trainer.add_callback("on_fit_epoch_end", on_fit_epoch_end)
         trainer.train()
         trained_model = save_dir / "weights" / "best.niii-model"

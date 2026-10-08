@@ -157,6 +157,10 @@ def _trusted_configuration(
         raise ValueError(f"不支持的 YOLO 模型规模: {scale}")
     suffix, model_type = _TASKS[expected_task]
     source_yaml = dict(container.model_yaml)
+    if "ch" in source_yaml:
+        legacy_channels = source_yaml.pop("ch")
+        if type(legacy_channels) is not int or legacy_channels != 3:
+            raise ValueError("加密模型冗余通道字段 ch 必须是整数 3")
     source_filename = source_yaml.get("yaml_file", "")
     if not isinstance(source_filename, str) or len(source_filename) > 1024:
         raise ValueError("加密模型 yaml_file 元数据非法")

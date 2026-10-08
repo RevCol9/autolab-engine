@@ -184,6 +184,32 @@ class EncryptedYoloRuntimeTest(unittest.TestCase):
         for name, tensor in source.model.state_dict().items():
             self.assertTrue(torch.equal(restored.model.state_dict()[name], tensor), name)
 
+    def test_redundant_rgb_ch_metadata_is_normalized(self):
+        from toolkit.model_crypto import load_yolo_container
+
+        source_yaml = deepcopy(self.models["detect"].model.yaml)
+        source_yaml["ch"] = 3
+        path = self._write(model_yaml=source_yaml)
+
+        restored = load_yolo_container(
+            path, "cpu", "detect", key_dir=self.keys, allow_cpu_for_tests=True,
+        )
+
+        self.assertEqual(restored.model.yaml["channels"], 3)
+        self.assertNotIn("ch", restored.model.yaml)
+
+    def test_non_rgb_ch_metadata_is_rejected(self):
+        from toolkit.model_crypto import load_yolo_container
+
+        source_yaml = deepcopy(self.models["detect"].model.yaml)
+        source_yaml["ch"] = 1
+        path = self._write(model_yaml=source_yaml)
+
+        with self.assertRaisesRegex(ValueError, "ch"):
+            load_yolo_container(
+                path, "cpu", "detect", key_dir=self.keys, allow_cpu_for_tests=True,
+            )
+
     def test_source_filename_cannot_select_a_different_yolo_family(self):
         from ultralytics import YOLO
 

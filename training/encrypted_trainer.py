@@ -129,17 +129,24 @@ def create_encrypted_trainer(
     }.get(str(task).strip().lower())
     if trainer_type is None:
         raise ValueError(f"不支持的加密训练任务: {task!r}")
+    training_model = unwrap_model(model)
+    is_fused = getattr(training_model, "is_fused", None)
+    if callable(is_fused) and is_fused():
+        raise ValueError(
+            "加密训练拒绝 fused 预训练模型；推理/验证会原地融合模型，"
+            "请从 .niii-model 重新认证加载后再创建 Trainer"
+        )
     trainer = trainer_type(
         overrides={**dict(overrides), "pretrained": False, "resume": False},
         _callbacks=callbacks,
         key_dir=key_dir,
         allow_cpu_for_tests=allow_cpu_for_tests,
     )
-    model_yaml = getattr(unwrap_model(model), "yaml", None)
+    model_yaml = getattr(training_model, "yaml", None)
     if not isinstance(model_yaml, dict):
         raise ValueError("加密训练输入缺少受控 YOLO yaml")
     # Match the dataset class count exactly, while transferring compatible weights.
-    trainer.model = trainer.get_model(cfg=model_yaml, weights=unwrap_model(model), verbose=False)
+    trainer.model = trainer.get_model(cfg=model_yaml, weights=training_model, verbose=False)
     return trainer
 
 

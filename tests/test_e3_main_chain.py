@@ -65,6 +65,22 @@ class EncryptedInferenceMainChainTest(unittest.TestCase):
 
 
 class EncryptedTrainingArtifactContractTest(unittest.TestCase):
+    def test_encrypted_trainer_rejects_fused_pretrained_model(self):
+        from ultralytics import YOLO
+
+        from training.encrypted_trainer import create_encrypted_trainer
+
+        model = YOLO("yolo11n.yaml", task="detect").model
+        model.fuse(verbose=False)
+
+        with self.assertRaisesRegex(ValueError, "fused"):
+            create_encrypted_trainer(
+                model,
+                task="detection",
+                overrides={},
+                allow_cpu_for_tests=True,
+            )
+
     def _run_one_epoch_training(self, task: str) -> None:
         import yaml
         from PIL import Image
