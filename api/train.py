@@ -17,6 +17,8 @@ from typing import Any, Dict, Literal, Optional
 from fastapi import FastAPI, HTTPException, Query
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field
 
+from api.artifact_monitor import router as artifact_monitor_router
+from api.artifact_monitor_ui import router as artifact_monitor_ui_router
 from shared.device import is_cuda_device
 from shared.gpu_lock import GpuDeviceLock, parse_device_index
 from shared.openapi_docs import openapi_description
@@ -35,6 +37,8 @@ app = FastAPI(
     version="0.4.0",
     description=openapi_description("train", summary="YOLO 闭环训练（检测 / 分割）"),
 )
+app.include_router(artifact_monitor_router)
+app.include_router(artifact_monitor_ui_router)
 
 
 class TrainJobBody(BaseModel):

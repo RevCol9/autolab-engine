@@ -9,6 +9,7 @@ import subprocess
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+from training.artifact_monitor_service import MONITOR_SERVICE
 from training.hparams import write_job_train_config
 from training.paths import CLOSED_LOOP_TRAIN_SCRIPT, YOLO_PYTHON, train_save_dir
 from training.run_artifacts import TRAINING_METRICS_CSV, reset_run_artifacts
@@ -55,10 +56,20 @@ def popen_train(
     cwd: Optional[str] = None,
 ) -> subprocess.Popen:
     cmd = build_closed_loop_cmd(param, task=task, device=device)
-    save_dir = train_save_dir(str(param["projectId"]), str(param["taskId"]), str(param["trainNum"]))
+    save_dir = train_save_dir(
+        str(param["projectId"]),
+        str(param["taskId"]),
+        str(param["trainNum"]),
+    )
     log_path = save_dir / "train.log"
     reset_run_artifacts(save_dir)
-    logger.info("closed_loop_train popen task=%s: %s | log=%s", task, " ".join(cmd), log_path)
+    monitor_environment = MONITOR_SERVICE.environment_for(save_dir)
+    logger.info(
+        "closed_loop_train popen task=%s: %s | log=%s",
+        task,
+        " ".join(cmd),
+        log_path,
+    )
     with open(log_path, "w", encoding="utf-8") as log_fp:
         proc = subprocess.Popen(
             cmd,
@@ -66,7 +77,11 @@ def popen_train(
             stdout=log_fp,
             stderr=subprocess.STDOUT,
             start_new_session=True,
-            env={**os.environ, "PYTHONUNBUFFERED": "1"},
+            env={
+                **os.environ,
+                **monitor_environment,
+                "PYTHONUNBUFFERED": "1",
+            },
         )
     return proc
 
