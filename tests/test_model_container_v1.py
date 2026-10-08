@@ -5,6 +5,7 @@ import tempfile
 import tracemalloc
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 @unittest.skipUnless(
@@ -34,7 +35,7 @@ class ModelContainerV1Test(unittest.TestCase):
             "complex128": torch.tensor([1.25 - 2.5j], dtype=torch.complex128),
         }
 
-    def _write(self, path: Path) -> None:
+    def _write(self, path: Path, *, key_id: str = "test-key") -> None:
         from toolkit.model_crypto.container_v1 import write_model_container
 
         write_model_container(
@@ -44,8 +45,13 @@ class ModelContainerV1Test(unittest.TestCase):
             model_names={0: "helmet"},
             task="detect",
             kek=self.kek,
-            key_id="test-key",
+            key_id=key_id,
         )
+
+    def test_key_id_rejects_control_characters(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaisesRegex(ValueError, "控制字符"):
+                self._write(Path(tmp) / "model.niii-model", key_id="bad\nkey")
 
     def test_all_supported_dtypes_keep_exact_bytes(self):
         from toolkit.model_crypto.container_v1 import read_model_container
@@ -178,6 +184,46 @@ class ModelContainerV1Test(unittest.TestCase):
                     replace_existing=True,
                 )
             self.assertEqual("do not overwrite", plaintext.read_text(encoding="utf-8"))
+
+    def test_failed_temporary_verification_preserves_existing_container(self):
+        from toolkit.model_crypto.container_v1 import write_model_container
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "model.niii-model"
+            self._write(path)
+            original = path.read_bytes()
+            with patch(
+                "toolkit.model_crypto.container_v1._read_model_container",
+                side_effect=ValueError("verification failed"),
+            ), self.assertRaisesRegex(ValueError, "verification failed"):
+                write_model_container(
+                    path,
+                    state_dict=self.tensors,
+                    model_yaml={"nc": 1},
+                    model_names={0: "helmet"},
+                    task="detect",
+                    kek=self.kek,
+                    key_id="test-key",
+                    replace_existing=True,
+                )
+            self.assertEqual(original, path.read_bytes())
+            self.assertEqual([], list(path.parent.glob(".*.tmp")))
+
+    def test_writer_rejects_non_string_class_names(self):
+        from toolkit.model_crypto.container_v1 import write_model_container
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "model.niii-model"
+            with self.assertRaisesRegex(ValueError, "model_names"):
+                write_model_container(
+                    path,
+                    state_dict=self.tensors,
+                    model_yaml={"nc": 1},
+                    model_names={0: 123},
+                    task="detect",
+                    kek=self.kek,
+                    key_id="test-key",
+                )
 
     def test_writer_rejects_tensor_rank_that_reader_cannot_load(self):
         from toolkit.model_crypto.container_v1 import write_model_container

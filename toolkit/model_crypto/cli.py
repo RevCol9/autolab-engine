@@ -7,7 +7,6 @@ import logging
 
 from toolkit.model_crypto.config import default_model_crypto_config
 from toolkit.model_crypto.envelope import init_kek
-from toolkit.model_crypto.offline_convert import convert_trusted_pt
 
 
 def _keys_default() -> str:
@@ -18,13 +17,17 @@ def _keys_default() -> str:
 
 
 def _cmd_init_kek(args: argparse.Namespace) -> None:
-    path, kid = init_kek(args.keys, kek_id=args.kek_id, overwrite=args.overwrite)
+    path, kid = init_kek(args.keys, kek_id=args.kek_id)
     print(f"KEK: {path} (kek_id={kid})")
 
 
 def _cmd_pack_v1(args: argparse.Namespace) -> None:
     if not args.trust_source_pt:
         raise SystemExit("pack-v1 只能在隔离构建机处理可信 .pt；请显式指定 --trust-source-pt")
+    # Keep key management independent of Torch/Ultralytics. The unsafe pickle
+    # importer is loaded only for this explicit build-host command.
+    from toolkit.model_crypto.offline_convert import convert_trusted_pt
+
     result = convert_trusted_pt(
         args.src, args.dst, task=args.task, key_dir=args.keys,
     )
@@ -40,7 +43,6 @@ def main(argv: list[str] | None = None) -> None:
     p_init = sub.add_parser("init-kek", help="生成 KEK")
     p_init.add_argument("--keys", default=keys_default)
     p_init.add_argument("--kek-id", default=None)
-    p_init.add_argument("--overwrite", action="store_true")
     p_init.set_defaults(func=_cmd_init_kek)
 
     p_pack = sub.add_parser("pack-v1", help="隔离构建机：可信 .pt 转换为 .niii-model")

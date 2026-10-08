@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
@@ -17,11 +18,28 @@ ENV_MODEL_CRYPTO_CONFIG = "NIII_MODEL_CRYPTO_CONFIG"
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _CONFIG_CANDIDATES = (
     _REPO_ROOT / "config" / "model_crypto.yaml",
-    _REPO_ROOT / "config" / "model_crypto.example.yaml",
 )
 _CONFIG_KEYS = frozenset(
     {"keys_dir", "kek_id", "kek_file_name", "kek_id_file_name"}
 )
+_SAFE_FILE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+
+
+def validate_key_id(value: Any) -> str:
+    key_id = str(value or "").strip()
+    if not key_id or len(key_id.encode("utf-8")) > 128:
+        raise ValueError("kek_id 的 UTF-8 长度必须位于 1..128 字节")
+    if any(ord(char) < 32 for char in key_id):
+        raise ValueError("kek_id 不能包含控制字符")
+    return key_id
+
+
+def _validate_file_name(value: Any, *, field: str, default: str) -> str:
+    name = default if value is None else str(value).strip()
+    if not _SAFE_FILE_NAME.fullmatch(name) or name in {".", ".."}:
+        raise ValueError(f"{field} 必须是安全的单层文件名")
+    return name
+
 
 @dataclass(frozen=True)
 class ModelCryptoConfig:
@@ -35,9 +53,9 @@ class ModelCryptoConfig:
     def resolved_keys_dir(self) -> Path | None:
         env_dir = os.environ.get(ENV_MODEL_KEYS_DIR, "").strip()
         if env_dir:
-            return Path(env_dir).expanduser()
+            return Path(env_dir).expanduser().resolve()
         if self.keys_dir:
-            return Path(self.keys_dir).expanduser()
+            return Path(self.keys_dir).expanduser().resolve()
         return None
 
     @classmethod
@@ -48,9 +66,17 @@ class ModelCryptoConfig:
             raise ValueError(f"模型加密配置包含不支持的字段: {unknown}")
         return cls(
             keys_dir=_optional_str(raw.get("keys_dir")),
-            kek_id=str(raw.get("kek_id") or "default"),
-            kek_file_name=str(raw.get("kek_file_name") or "kek.key"),
-            kek_id_file_name=str(raw.get("kek_id_file_name") or "kek_id.txt"),
+            kek_id=validate_key_id(raw.get("kek_id", "default")),
+            kek_file_name=_validate_file_name(
+                raw.get("kek_file_name"),
+                field="kek_file_name",
+                default="kek.key",
+            ),
+            kek_id_file_name=_validate_file_name(
+                raw.get("kek_id_file_name"),
+                field="kek_id_file_name",
+                default="kek_id.txt",
+            ),
         )
 
     @classmethod
@@ -104,7 +130,7 @@ def default_model_crypto_config(*, reload: bool = False) -> ModelCryptoConfig:
     if env_keys:
         updates["keys_dir"] = env_keys
     if env_kid:
-        updates["kek_id"] = env_kid
+        updates["kek_id"] = validate_key_id(env_kid)
     if updates:
         cfg = replace(cfg, **updates)
     _CACHED = cfg

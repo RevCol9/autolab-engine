@@ -15,6 +15,8 @@ import torch
 from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
+from toolkit.model_crypto.config import validate_key_id
+
 MAGIC = b"NIIIMODL"
 FORMAT_VERSION = 1
 MAX_PLAINTEXT_BYTES = 1024**3  # Whole-file AEAD: deliberately limit peak memory.
@@ -54,12 +56,35 @@ def _json_value(value: Any) -> Any:
     raise TypeError(f"模型元数据包含不支持的类型: {type(value).__name__}")
 
 
+def _wipe(buffer: bytearray) -> None:
+    zeros = b"\x00" * min(len(buffer), 1024 * 1024)
+    view = memoryview(buffer)
+    try:
+        for start in range(0, len(buffer), len(zeros) or 1):
+            view[start : start + len(zeros)] = zeros[: len(buffer) - start]
+    finally:
+        view.release()
+
+
+def _reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"加密模型 JSON 包含重复字段: {key}")
+        result[key] = value
+    return result
+
+
+def _reject_json_constant(value: str) -> None:
+    raise ValueError(f"加密模型 JSON 包含非法数值: {value}")
+
+
 def _encode_payload(
     state_dict: Mapping[str, torch.Tensor],
     model_yaml: Mapping[str, Any],
     model_names: Mapping[int | str, str],
     task: str,
-) -> bytes:
+) -> bytearray:
     if task not in {"detect", "segment"}:
         raise ValueError("task 仅支持 detect 或 segment")
     if not state_dict or len(state_dict) > MAX_TENSORS:
@@ -68,19 +93,24 @@ def _encode_payload(
         raise ValueError("state_dict 张量名称必须是非空字符串")
     normalized_names: dict[str, str] = {}
     for key, value in model_names.items():
-        if isinstance(key, bool) or not str(key).isdigit() or not str(value):
+        if (
+            isinstance(key, bool)
+            or not str(key).isdigit()
+            or not isinstance(value, str)
+            or not value
+        ):
             raise ValueError("model_names 必须是非负类别 ID 到非空名称的映射")
         normalized_key = str(int(key))
         if normalized_key in normalized_names:
             raise ValueError(f"model_names 存在重复类别 ID: {key}")
-        normalized_names[normalized_key] = str(value)
+        normalized_names[normalized_key] = value
     if not normalized_names:
         raise ValueError("model_names 不能为空")
 
     entries: list[dict[str, Any]] = []
-    chunks: list[bytes] = []
+    ordered_tensors = sorted(state_dict.items())
     offset = 0
-    for name, tensor in sorted(state_dict.items()):
+    for name, tensor in ordered_tensors:
         if not isinstance(tensor, torch.Tensor) or tensor.layout != torch.strided:
             raise TypeError(f"不支持的张量布局: {name}")
         if tensor.ndim > 16:
@@ -88,19 +118,15 @@ def _encode_payload(
         dtype_name = str(tensor.dtype).removeprefix("torch.")
         if dtype_name not in _DTYPES:
             raise TypeError(f"不支持的张量 dtype: {name}={tensor.dtype}")
-        raw = (
-            tensor.detach().cpu().contiguous().reshape(-1).view(torch.uint8).numpy().tobytes()
-            if tensor.numel() else b""
-        )
+        length = tensor.numel() * tensor.element_size()
         entries.append({
             "name": name,
             "dtype": dtype_name,
             "shape": list(tensor.shape),
             "offset": offset,
-            "length": len(raw),
+            "length": length,
         })
-        chunks.append(raw)
-        offset += len(raw)
+        offset += length
         if offset > MAX_PLAINTEXT_BYTES:
             raise ValueError("模型超出首版容器的 1 GiB 内存加密上限")
 
@@ -118,7 +144,36 @@ def _encode_payload(
         raise ValueError("模型元数据超出首版容器的 16 MiB 上限")
     if 4 + len(encoded) + offset > MAX_PLAINTEXT_BYTES:
         raise ValueError("模型超出首版容器的 1 GiB 内存加密上限")
-    return struct.pack(">I", len(encoded)) + encoded + b"".join(chunks)
+    payload = bytearray(4 + len(encoded) + offset)
+    struct.pack_into(">I", payload, 0, len(encoded))
+    payload[4 : 4 + len(encoded)] = encoded
+    cursor = 4 + len(encoded)
+    try:
+        for name, tensor in ordered_tensors:
+            if not tensor.numel():
+                continue
+            raw_array = (
+                tensor.detach()
+                .cpu()
+                .contiguous()
+                .reshape(-1)
+                .view(torch.uint8)
+                .numpy()
+            )
+            raw_view = memoryview(raw_array)
+            try:
+                expected_length = tensor.numel() * tensor.element_size()
+                if raw_view.nbytes != expected_length:
+                    raise RuntimeError(f"张量原始字节长度异常: {name}")
+                payload[cursor : cursor + expected_length] = raw_view
+                cursor += expected_length
+            finally:
+                raw_view.release()
+                del raw_array
+    except Exception:
+        _wipe(payload)
+        raise
+    return payload
 
 
 def write_model_container(
@@ -160,20 +215,31 @@ def write_model_container(
             raise ValueError(f"替换目标不是已有加密模型: {destination}")
     if len(kek) != 32:
         raise ValueError("KEK 必须为 32 字节")
+    key_id = validate_key_id(key_id)
     key_id_bytes = key_id.encode("utf-8")
-    if not 0 < len(key_id_bytes) <= MAX_KEY_ID_BYTES:
-        raise ValueError("key_id 长度必须在 1..128 字节之间")
 
     plaintext = _encode_payload(state_dict, model_yaml, model_names, task)
-    dek = os.urandom(32)
+    dek = bytearray(os.urandom(32))
     wrap_nonce = os.urandom(12)
     payload_nonce = os.urandom(12)
-    wrapped_dek = AESGCM(kek).encrypt(wrap_nonce, dek, _WRAP_CONTEXT + key_id_bytes)
-    header = _HEADER.pack(
-        MAGIC, FORMAT_VERSION, 0, len(key_id_bytes), len(plaintext) + 16,
-        len(plaintext), wrap_nonce, payload_nonce, wrapped_dek,
-    )
-    ciphertext = AESGCM(dek).encrypt(payload_nonce, plaintext, header + key_id_bytes)
+    try:
+        wrapped_dek = AESGCM(kek).encrypt(
+            wrap_nonce,
+            dek,
+            _WRAP_CONTEXT + key_id_bytes,
+        )
+        header = _HEADER.pack(
+            MAGIC, FORMAT_VERSION, 0, len(key_id_bytes), len(plaintext) + 16,
+            len(plaintext), wrap_nonce, payload_nonce, wrapped_dek,
+        )
+        ciphertext = AESGCM(dek).encrypt(
+            payload_nonce,
+            plaintext,
+            header + key_id_bytes,
+        )
+    finally:
+        _wipe(plaintext)
+        _wipe(dek)
 
     destination.parent.mkdir(parents=True, exist_ok=True)
     descriptor, temporary_name = tempfile.mkstemp(
@@ -187,21 +253,52 @@ def write_model_container(
             stream.write(ciphertext)
             stream.flush()
             os.fsync(stream.fileno())
-        os.replace(temporary, destination)
+        del ciphertext
+        verified = _read_model_container(temporary, kek=kek, require_suffix=False)
+        if (
+            verified.task != task
+            or verified.key_id != key_id
+            or set(verified.state_dict) != set(state_dict)
+        ):
+            raise RuntimeError("加密模型临时文件写后验证失败")
+        del verified
+        if replace_existing:
+            os.replace(temporary, destination)
+        else:
+            os.link(temporary, destination)
+            temporary.unlink()
+        if os.name != "nt":
+            directory_descriptor = os.open(destination.parent, os.O_RDONLY)
+            try:
+                os.fsync(directory_descriptor)
+            finally:
+                os.close(directory_descriptor)
     finally:
         temporary.unlink(missing_ok=True)
     return destination
 
 
-def _decode_payload(payload: bytes, key_id: str) -> ModelContainer:
+def _decode_payload(payload: bytes | bytearray, key_id: str) -> ModelContainer:
     if len(payload) < 4:
         raise ValueError("加密模型载荷缺少元数据长度")
     metadata_length = struct.unpack_from(">I", payload)[0]
     if not 0 < metadata_length <= MAX_METADATA_BYTES or 4 + metadata_length > len(payload):
         raise ValueError("加密模型元数据长度非法")
-    metadata = json.loads(payload[4 : 4 + metadata_length])
+    metadata = json.loads(
+        payload[4 : 4 + metadata_length],
+        object_pairs_hook=_reject_duplicate_keys,
+        parse_constant=_reject_json_constant,
+    )
     if not isinstance(metadata, dict) or metadata.get("task") not in {"detect", "segment"}:
         raise ValueError("加密模型任务或元数据格式非法")
+    if set(metadata) != {
+        "task",
+        "byte_order",
+        "model_yaml",
+        "model_names",
+        "tensors",
+    }:
+        raise ValueError("加密模型元数据包含缺失或未知字段")
     if metadata.get("byte_order") != sys.byteorder:
         raise ValueError("加密模型字节序与当前服务器不兼容")
     if not isinstance(metadata.get("model_yaml"), dict):
@@ -219,6 +316,8 @@ def _decode_payload(payload: bytes, key_id: str) -> ModelContainer:
     for entry in entries:
         if not isinstance(entry, dict):
             raise ValueError("加密模型张量索引格式非法")
+        if set(entry) != {"name", "dtype", "shape", "offset", "length"}:
+            raise ValueError("加密模型张量索引包含缺失或未知字段")
         name = entry.get("name")
         dtype_name = entry.get("dtype")
         dtype = _DTYPES.get(dtype_name) if isinstance(dtype_name, str) else None
@@ -245,8 +344,11 @@ def _decode_payload(payload: bytes, key_id: str) -> ModelContainer:
         if offset + length > len(tensor_bytes):
             raise ValueError(f"加密模型张量越界: {name}")
         if length:
-            raw = bytearray(tensor_bytes[offset : offset + length])
-            tensor = torch.frombuffer(raw, dtype=dtype).clone().reshape(shape)
+            raw_view = tensor_bytes[offset : offset + length]
+            try:
+                tensor = torch.frombuffer(raw_view, dtype=dtype).clone().reshape(shape)
+            finally:
+                raw_view.release()
         else:
             tensor = torch.empty(shape, dtype=dtype)
         state_dict[name] = tensor
@@ -269,12 +371,16 @@ def _decode_payload(payload: bytes, key_id: str) -> ModelContainer:
     )
 
 
-def read_model_container(path: str | Path, *, kek: bytes) -> ModelContainer:
-    """Authenticate the entire ciphertext before parsing metadata or tensor bytes."""
+def _read_model_container(
+    path: str | Path,
+    *,
+    kek: bytes,
+    require_suffix: bool,
+) -> ModelContainer:
     if len(kek) != 32:
         raise ValueError("KEK 必须为 32 字节")
     path = Path(path)
-    if path.suffix != ".niii-model":
+    if require_suffix and path.suffix != ".niii-model":
         raise ValueError("模型文件必须以 .niii-model 结尾")
     max_file_bytes = _HEADER.size + MAX_KEY_ID_BYTES + MAX_PLAINTEXT_BYTES + 16
     with path.open("rb") as stream:
@@ -300,19 +406,45 @@ def read_model_container(path: str | Path, *, kek: bytes) -> ModelContainer:
         raise ValueError("加密模型文件长度与文件头不一致")
     key_id_bytes = data[_HEADER.size : _HEADER.size + key_id_length]
     authenticated_header = data[: _HEADER.size + key_id_length]
-    ciphertext = data[_HEADER.size + key_id_length :]
+    ciphertext = memoryview(data)[_HEADER.size + key_id_length :]
+    dek: bytearray | None = None
     try:
-        dek = AESGCM(kek).decrypt(
-            wrap_nonce, wrapped_dek, _WRAP_CONTEXT + key_id_bytes,
+        dek = bytearray(
+            AESGCM(kek).decrypt(
+                wrap_nonce,
+                wrapped_dek,
+                _WRAP_CONTEXT + key_id_bytes,
+            )
         )
-        plaintext = AESGCM(dek).decrypt(
-            payload_nonce, ciphertext, authenticated_header,
+        plaintext = bytearray(
+            AESGCM(dek).decrypt(
+                payload_nonce,
+                ciphertext,
+                authenticated_header,
+            )
         )
     except InvalidTag as exc:
         raise ValueError("加密模型认证失败：密钥错误或文件已损坏") from exc
+    finally:
+        ciphertext.release()
+        if dek is not None:
+            _wipe(dek)
+    del data
     if len(plaintext) != plain_length:
+        _wipe(plaintext)
         raise ValueError("加密模型解密长度不匹配")
-    return _decode_payload(plaintext, key_id_bytes.decode("utf-8"))
+    try:
+        return _decode_payload(
+            plaintext,
+            validate_key_id(key_id_bytes.decode("utf-8")),
+        )
+    finally:
+        _wipe(plaintext)
+
+
+def read_model_container(path: str | Path, *, kek: bytes) -> ModelContainer:
+    """Authenticate the entire ciphertext before parsing metadata or tensor bytes."""
+    return _read_model_container(path, kek=kek, require_suffix=True)
 
 
 __all__ = [

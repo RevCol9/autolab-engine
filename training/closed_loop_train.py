@@ -8,6 +8,7 @@ import time
 from pathlib import Path
 
 from toolkit.model_crypto import create_yolo_architecture, load_yolo_container
+from toolkit.model_crypto.yolo_contract import container_task_for_training
 from training.backends import get_backend
 from training.encrypted_trainer import create_encrypted_trainer
 from training.hparams import load_job_config
@@ -48,11 +49,11 @@ def main():
     actual_resource = {}
     sampler_started = False
     device = str(config.get("device", "0"))
-    container_task = {"detection": "detect", "segmentation": "segment"}[train_task]
+    container_task = container_task_for_training(train_task)
     allow_cpu_for_tests = os.environ.get("NIII_ALLOW_CPU_MODEL_TESTS") == "1"
 
     def load_controlled_model():
-        if Path(model_path).suffix.lower() == ".niii-model":
+        if Path(model_path).suffix == ".niii-model":
             return load_yolo_container(
                 model_path,
                 device,

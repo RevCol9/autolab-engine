@@ -6,12 +6,14 @@ import base64
 import binascii
 import os
 import secrets
+import stat
 from pathlib import Path
 from toolkit.model_crypto.config import (
     ENV_MODEL_KEK,
     ENV_MODEL_KEK_ID,
     ModelCryptoConfig,
     default_model_crypto_config,
+    validate_key_id,
 )
 
 
@@ -57,32 +59,50 @@ def parse_kek_material(raw: str | bytes) -> bytes:
 def resolve_keys_dir(
     key_dir: str | Path | None = None,
     *,
-    model_path: Path | None = None,
     config: ModelCryptoConfig | None = None,
 ) -> Path | None:
-    """解析密钥目录：显式参数 > 配置/环境 > cwd/keys > 权重旁 keys/。"""
+    """Resolve an explicitly supplied or configured key directory."""
     if key_dir is not None:
-        return Path(key_dir).expanduser()
+        return Path(key_dir).expanduser().resolve()
 
     cfg = _cfg(config)
     configured = cfg.resolved_keys_dir()
     if configured is not None:
         return configured
 
-    candidates = [Path.cwd() / "keys"]
-    if model_path is not None:
-        candidates.append(Path(model_path).parent / "keys")
-    for candidate in candidates:
-        if candidate.is_dir():
-            return candidate
     return None
+
+
+def _read_key_file(path: Path) -> bytes:
+    try:
+        file_stat = path.lstat()
+    except FileNotFoundError:
+        raise FileNotFoundError(f"缺少 KEK 文件: {path}") from None
+    if stat.S_ISLNK(file_stat.st_mode) or not stat.S_ISREG(file_stat.st_mode):
+        raise ValueError(f"KEK 路径必须是普通文件且不能是符号链接: {path}")
+    if os.name != "nt" and stat.S_IMODE(file_stat.st_mode) & 0o077:
+        raise PermissionError(f"KEK 文件权限必须限制为 0600: {path}")
+    if file_stat.st_size > 4096:
+        raise ValueError(f"KEK 文件异常过大: {path}")
+    return path.read_bytes()
+
+
+def _read_key_id_file(path: Path) -> str | None:
+    try:
+        file_stat = path.lstat()
+    except FileNotFoundError:
+        return None
+    if stat.S_ISLNK(file_stat.st_mode) or not stat.S_ISREG(file_stat.st_mode):
+        raise ValueError(f"kek_id 路径必须是普通文件且不能是符号链接: {path}")
+    if file_stat.st_size > 512:
+        raise ValueError(f"kek_id 文件异常过大: {path}")
+    return validate_key_id(path.read_text(encoding="utf-8"))
 
 
 def load_kek(
     *,
     kek: bytes | str | None = None,
     key_dir: str | Path | None = None,
-    model_path: Path | None = None,
     config: ModelCryptoConfig | None = None,
 ) -> tuple[bytes, str]:
     """
@@ -95,56 +115,84 @@ def load_kek(
 
     if kek is not None:
         return parse_kek_material(kek), (
-            os.environ.get(ENV_MODEL_KEK_ID, "").strip() or cfg.kek_id
+            validate_key_id(os.environ.get(ENV_MODEL_KEK_ID, "").strip() or cfg.kek_id)
         )
 
     env_kek = os.environ.get(ENV_MODEL_KEK, "").strip()
     if env_kek:
         return parse_kek_material(env_kek), (
-            os.environ.get(ENV_MODEL_KEK_ID, "").strip() or cfg.kek_id
+            validate_key_id(os.environ.get(ENV_MODEL_KEK_ID, "").strip() or cfg.kek_id)
         )
 
-    keys = resolve_keys_dir(key_dir, model_path=model_path, config=cfg)
+    keys = resolve_keys_dir(key_dir, config=cfg)
     if keys is None:
         raise FileNotFoundError(
             f"未找到 KEK：请设置 {ENV_MODEL_KEK}，或配置 keys_dir 并放置 {cfg.kek_file_name}"
         )
 
     kek_path = keys / cfg.kek_file_name
-    if not kek_path.is_file():
-        raise FileNotFoundError(f"缺少 KEK 文件: {kek_path}")
-
-    material = parse_kek_material(kek_path.read_bytes())
+    material = parse_kek_material(_read_key_file(kek_path))
     kek_id = os.environ.get(ENV_MODEL_KEK_ID, "").strip()
     if not kek_id:
-        id_path = keys / cfg.kek_id_file_name
-        if id_path.is_file():
-            kek_id = id_path.read_text(encoding="utf-8").strip()
-    return material, kek_id or cfg.kek_id
+        kek_id = _read_key_id_file(keys / cfg.kek_id_file_name) or cfg.kek_id
+    return material, validate_key_id(kek_id)
 
 
 def init_kek(
     key_dir: str | Path,
     *,
     kek_id: str | None = None,
-    overwrite: bool = False,
     config: ModelCryptoConfig | None = None,
 ) -> tuple[Path, str]:
     """在密钥目录写入随机 KEK（32 字节）及 kek_id。"""
     cfg = _cfg(config)
-    key_dir = Path(key_dir)
+    key_dir = Path(key_dir).expanduser().resolve()
     key_dir.mkdir(parents=True, exist_ok=True)
+    if os.name != "nt":
+        os.chmod(key_dir, 0o700)
     kek_path = key_dir / cfg.kek_file_name
     id_path = key_dir / cfg.kek_id_file_name
-    kid = (kek_id or cfg.kek_id).strip() or cfg.kek_id
+    kid = validate_key_id(kek_id or cfg.kek_id)
 
-    if kek_path.exists() and not overwrite:
-        raise FileExistsError(f"KEK 已存在: {kek_path}")
+    if kek_path.exists() or id_path.exists():
+        raise FileExistsError(
+            f"KEK 或 kek_id 已存在，拒绝覆盖；轮换必须使用新的 key ID/目录: {key_dir}"
+        )
 
-    kek_path.write_bytes(secrets.token_bytes(32))
-    id_path.write_text(kid + "\n", encoding="utf-8")
+    key_created = False
+    id_created = False
     try:
-        os.chmod(kek_path, 0o600)
-    except OSError:
-        pass
+        key_descriptor = os.open(
+            kek_path,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+            0o600,
+        )
+        key_created = True
+        with os.fdopen(key_descriptor, "wb") as stream:
+            stream.write(secrets.token_bytes(32))
+            stream.flush()
+            os.fsync(stream.fileno())
+
+        id_descriptor = os.open(
+            id_path,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+            0o600,
+        )
+        id_created = True
+        with os.fdopen(id_descriptor, "w", encoding="utf-8") as stream:
+            stream.write(kid + "\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+    except Exception:
+        if key_created:
+            kek_path.unlink(missing_ok=True)
+        if id_created:
+            id_path.unlink(missing_ok=True)
+        raise
+    if os.name != "nt":
+        directory_descriptor = os.open(key_dir, os.O_RDONLY)
+        try:
+            os.fsync(directory_descriptor)
+        finally:
+            os.close(directory_descriptor)
     return kek_path, kid

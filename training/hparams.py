@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import re
 from copy import deepcopy
 from pathlib import Path
 from typing import Any, Dict, Mapping, Optional
@@ -10,6 +9,10 @@ from typing import Any, Dict, Mapping, Optional
 import yaml
 
 from training.backends import get_backend
+from toolkit.model_crypto.yolo_contract import (
+    container_task_for_training,
+    parse_controlled_architecture,
+)
 from training.dataset import TrainingDataset
 from training.paths import (
     baseline_model_from_last_train,
@@ -23,11 +26,6 @@ API_FIELD_ALIASES: Dict[str, str] = {
     "batch_size": "batch",
     "image_size": "imgsz",
 }
-
-_CONTROLLED_MODEL = re.compile(
-    r"^(?:yolov8|yolo11|yolo26)[nsmlx](?:-seg)?\.yaml$",
-    flags=re.IGNORECASE,
-)
 
 JOB_META_KEYS = frozenset(
     {
@@ -62,20 +60,19 @@ def _validate_controlled_architecture(model: Any, *, task: str) -> str:
             "model 必须是受控 YOLOv8/YOLO11/YOLO26 架构 YAML，"
             "或通过 pretrained_model_path 提供 .niii-model"
         )
-    name = text.lower()
-    if not _CONTROLLED_MODEL.fullmatch(name):
+    container_task = container_task_for_training(task)
+    try:
+        architecture = parse_controlled_architecture(text)
+    except ValueError as exc:
         raise ValueError(
             "model 必须是受控 YOLOv8/YOLO11/YOLO26 架构 YAML，"
             "或通过 pretrained_model_path 提供 .niii-model"
-        )
-    is_segment = name.endswith("-seg.yaml")
-    if task == "segmentation" and not is_segment:
+        ) from exc
+    if container_task == "segment" and architecture.task != "segment":
         raise ValueError("分割训练必须使用 *-seg.yaml 受控架构")
-    if task == "detection" and is_segment:
+    if container_task == "detect" and architecture.task != "detect":
         raise ValueError("检测训练不能使用分割架构")
-    if task not in {"detection", "segmentation"}:
-        raise ValueError(f"不支持的训练任务: {task!r}")
-    return name
+    return architecture.name
 
 
 def resolve_model_path(
@@ -142,7 +139,7 @@ def build_job_train_config(
     config: Dict[str, Any] = load_training_defaults(task)
     config.update(normalize_api_param(param))
     model_path = resolve_model_path(param, task=task, defaults=config)
-    if Path(model_path).suffix.lower() == ".niii-model":
+    if Path(model_path).suffix == ".niii-model":
         ensure_input_survives_reset(model_path, save_path)
 
     data_yaml = TrainingDataset.from_job(param).prepare(task=task)
@@ -196,7 +193,7 @@ def load_job_config(path: str | Path) -> Dict[str, Any]:
     if _truthy(data.get("resume")):
         raise ValueError("加密训练首版不支持 resume=True；请从加密 best 重新微调")
     model = str(data["model"]).strip()
-    if Path(model).suffix.lower() == ".niii-model":
+    if Path(model).suffix == ".niii-model":
         data["model"] = resolve_pretrained_model_path(model)
     else:
         data["model"] = _validate_controlled_architecture(model, task=task)

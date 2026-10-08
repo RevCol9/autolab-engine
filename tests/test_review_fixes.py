@@ -265,6 +265,30 @@ class TrainStopStateTest(unittest.TestCase):
 
 
 class PretrainedModelPathTest(unittest.TestCase):
+    def test_relative_path_searches_all_configured_roots(self):
+        with tempfile.TemporaryDirectory() as first, tempfile.TemporaryDirectory() as second:
+            roots = (Path(first).resolve(), Path(second).resolve())
+            model = roots[1] / "published" / "best.niii-model"
+            model.parent.mkdir()
+            model.write_bytes(b"weights")
+            with patch("training.paths.TRAINING_MODEL_ROOTS", roots):
+                self.assertEqual(
+                    str(model),
+                    resolve_pretrained_model_path("published/best.niii-model"),
+                )
+
+    def test_relative_path_rejects_ambiguous_roots(self):
+        with tempfile.TemporaryDirectory() as first, tempfile.TemporaryDirectory() as second:
+            roots = (Path(first).resolve(), Path(second).resolve())
+            for root in roots:
+                model = root / "model.niii-model"
+                model.write_bytes(b"weights")
+            with (
+                patch("training.paths.TRAINING_MODEL_ROOTS", roots),
+                self.assertRaisesRegex(ValueError, "无法消歧"),
+            ):
+                resolve_pretrained_model_path("model.niii-model")
+
     def test_resolves_conventional_encrypted_best_from_directory(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp).resolve()
@@ -284,6 +308,17 @@ class PretrainedModelPathTest(unittest.TestCase):
             with patch("training.paths.TRAINING_MODEL_ROOTS", (root,)):
                 resolved = resolve_pretrained_model_path(model.parent)
             self.assertEqual(str(model), resolved)
+
+    def test_encrypted_model_suffix_is_case_sensitive(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            model = root / "model.NIII-MODEL"
+            model.write_bytes(b"weights")
+            with (
+                patch("training.paths.TRAINING_MODEL_ROOTS", (root,)),
+                self.assertRaisesRegex(ValueError, "必须是 .niii-model"),
+            ):
+                resolve_pretrained_model_path(model)
 
     def test_rejects_path_outside_configured_roots(self):
         with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as other:

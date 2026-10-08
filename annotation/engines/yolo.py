@@ -71,6 +71,82 @@ class YoloDetectEngine(BaseEngine):
             values.append((order, str(value)))
         return [value for _, value in sorted(values, key=lambda item: item[0])]
 
+    def _predict_raw(
+        self,
+        image: Image.Image,
+        *,
+        conf: Optional[float],
+        iou: Optional[float],
+        imgsz: Optional[int],
+        max_det: Optional[int],
+        **options: Any,
+    ) -> tuple[int, int, list[Any], float]:
+        if self.model is None:
+            raise RuntimeError("模型未加载")
+        if image.mode != "RGB":
+            image = image.convert("RGB")
+        width, height = image.size
+        started = time.perf_counter()
+        results = self.model.predict(
+            source=image,
+            conf=float(self.config.conf if conf is None else conf),
+            iou=float(self.config.iou if iou is None else iou),
+            imgsz=int(self.config.imgsz if imgsz is None else imgsz),
+            max_det=int(self.config.max_det if max_det is None else max_det),
+            device=self.config.device,
+            verbose=False,
+            **options,
+        )
+        return width, height, results, time.perf_counter() - started
+
+    @staticmethod
+    def _boxes_from_result(
+        result: Any,
+        *,
+        width: int,
+        height: int,
+        coord_space: str,
+    ) -> tuple[list[dict[str, Any]], list[Any], list[int], list[float], list[str]]:
+        if result is None or result.boxes is None or not len(result.boxes):
+            return [], [], [], [], []
+        names = result.names or {}
+        xyxy = result.boxes.xyxy.detach().cpu().tolist()
+        class_ids = [int(value) for value in result.boxes.cls.detach().cpu().tolist()]
+        scores = [float(value) for value in result.boxes.conf.detach().cpu().tolist()]
+        labels = [str(names.get(class_id, class_id)) for class_id in class_ids]
+        boxes = []
+        for coordinates, class_id, score, label in zip(
+            xyxy,
+            class_ids,
+            scores,
+            labels,
+        ):
+            x1, y1, x2, y2 = coordinates
+            box = (
+                {
+                    "x1": x1 / width * 1000.0,
+                    "y1": y1 / height * 1000.0,
+                    "x2": x2 / width * 1000.0,
+                    "y2": y2 / height * 1000.0,
+                }
+                if coord_space == "norm1000"
+                else {
+                    "x1": float(x1),
+                    "y1": float(y1),
+                    "x2": float(x2),
+                    "y2": float(y2),
+                }
+            )
+            boxes.append(
+                {
+                    "label": label,
+                    "class_id": class_id,
+                    "score": score,
+                    **box,
+                }
+            )
+        return boxes, xyxy, class_ids, scores, labels
+
     def predict(
         self,
         image: Image.Image,
@@ -81,57 +157,19 @@ class YoloDetectEngine(BaseEngine):
         max_det: Optional[int] = None,
         coord_space: str = "pixel",
     ) -> Dict[str, Any]:
-        if self.model is None:
-            raise RuntimeError("模型未加载")
-        if image.mode != "RGB":
-            image = image.convert("RGB")
-
-        w, h = image.size
-        conf_v = float(self.config.conf if conf is None else conf)
-        iou_v = float(self.config.iou if iou is None else iou)
-        imgsz_v = int(self.config.imgsz if imgsz is None else imgsz)
-        max_det_v = int(self.config.max_det if max_det is None else max_det)
-
-        t0 = time.perf_counter()
-        results = self.model.predict(
-            source=image,
-            conf=conf_v,
-            iou=iou_v,
-            imgsz=imgsz_v,
-            max_det=max_det_v,
-            device=self.config.device,
-            verbose=False,
+        w, h, results, infer_s = self._predict_raw(
+            image,
+            conf=conf,
+            iou=iou,
+            imgsz=imgsz,
+            max_det=max_det,
         )
-        infer_s = time.perf_counter() - t0
-
-        boxes: List[Dict[str, Any]] = []
-        if results:
-            r0 = results[0]
-            names = r0.names or {}
-            if r0.boxes is not None and len(r0.boxes):
-                xyxy = r0.boxes.xyxy.detach().cpu().tolist()
-                cls = r0.boxes.cls.detach().cpu().tolist()
-                confs = r0.boxes.conf.detach().cpu().tolist()
-                for (x1, y1, x2, y2), c, s in zip(xyxy, cls, confs):
-                    cid = int(c)
-                    label = str(names.get(cid, cid))
-                    if coord_space == "norm1000":
-                        box = {
-                            "x1": x1 / w * 1000.0,
-                            "y1": y1 / h * 1000.0,
-                            "x2": x2 / w * 1000.0,
-                            "y2": y2 / h * 1000.0,
-                        }
-                    else:
-                        box = {"x1": float(x1), "y1": float(y1), "x2": float(x2), "y2": float(y2)}
-                    boxes.append(
-                        {
-                            "label": label,
-                            "class_id": cid,
-                            "score": float(s),
-                            **box,
-                        }
-                    )
+        boxes, *_ = self._boxes_from_result(
+            results[0] if results else None,
+            width=w,
+            height=h,
+            coord_space=coord_space,
+        )
 
         return {
             "task": "detect",
@@ -176,67 +214,29 @@ class YoloSegmentEngine(YoloDetectEngine):
         if mask_format not in SUPPORTED_MASK_FORMATS:
             raise ValueError(f"不支持的 mask_format: {mask_format!r}")
 
-        if self.model is None:
-            raise RuntimeError("模型未加载")
-        if image.mode != "RGB":
-            image = image.convert("RGB")
-
-        w, h = image.size
-        conf_v = float(self.config.conf if conf is None else conf)
-        iou_v = float(self.config.iou if iou is None else iou)
-        imgsz_v = int(self.config.imgsz if imgsz is None else imgsz)
-        max_det_v = int(self.config.max_det if max_det is None else max_det)
-
-        t0 = time.perf_counter()
-        results = self.model.predict(
-            source=image,
-            conf=conf_v,
-            iou=iou_v,
-            imgsz=imgsz_v,
-            max_det=max_det_v,
-            device=self.config.device,
+        w, h, results, infer_s = self._predict_raw(
+            image,
+            conf=conf,
+            iou=iou,
+            imgsz=imgsz,
+            max_det=max_det,
             retina_masks=True,
-            verbose=False,
         )
-        infer_s = time.perf_counter() - t0
 
         boxes: List[Dict[str, Any]] = []
         segments: List[Dict[str, Any]] = []
         if results:
             r0 = results[0]
-            names = r0.names or {}
-            if r0.boxes is not None and len(r0.boxes):
-                xyxy = r0.boxes.xyxy.detach().cpu().tolist()
-                cls = r0.boxes.cls.detach().cpu().tolist()
-                confs = r0.boxes.conf.detach().cpu().tolist()
+            boxes, xyxy, class_ids, score_list, labels = self._boxes_from_result(
+                r0,
+                width=w,
+                height=h,
+                coord_space=coord_space,
+            )
+            if boxes:
                 polys: List[Any] = []
                 if r0.masks is not None:
                     polys = list(r0.masks.xy) if hasattr(r0.masks, "xy") else []
-
-                for idx, ((x1, y1, x2, y2), c, s) in enumerate(zip(xyxy, cls, confs)):
-                    cid = int(c)
-                    label = str(names.get(cid, cid))
-                    if coord_space == "norm1000":
-                        box = {
-                            "x1": x1 / w * 1000.0,
-                            "y1": y1 / h * 1000.0,
-                            "x2": x2 / w * 1000.0,
-                            "y2": y2 / h * 1000.0,
-                        }
-                    else:
-                        box = {"x1": float(x1), "y1": float(y1), "x2": float(x2), "y2": float(y2)}
-                    boxes.append(
-                        {
-                            "label": label,
-                            "class_id": cid,
-                            "score": float(s),
-                            **box,
-                        }
-                    )
-
-                labels = [str(names.get(int(c), c)) for c in cls]
-                class_ids = [int(c) for c in cls]
-                score_list = [float(s) for s in confs]
                 if polys:
                     segments = segments_from_yolo_polys(
                         polys,

@@ -48,7 +48,7 @@ def convert_trusted_pt(
     if not isinstance(names, dict):
         names = dict(enumerate(names))
 
-    kek, key_id = load_kek(key_dir=key_dir, model_path=source)
+    kek, key_id = load_kek(key_dir=key_dir)
     result = write_model_container(
         destination,
         state_dict=model.state_dict(),

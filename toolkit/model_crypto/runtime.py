@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import re
 from copy import deepcopy
 from pathlib import Path
 from typing import Any
@@ -14,21 +13,17 @@ from ultralytics.utils import ROOT, YAML
 
 from toolkit.model_crypto.container_v1 import ModelContainer, read_model_container
 from toolkit.model_crypto.envelope import load_kek
+from toolkit.model_crypto.yolo_contract import (
+    FAMILY_FOLDERS,
+    SCALES,
+    TASK_SUFFIXES,
+    parse_controlled_architecture,
+)
 
-_SCALES = frozenset("nsmlx")
-_FAMILIES = (
-    ("yolov8", "v8"),
-    ("yolo11", "11"),
-    ("yolo26", "26"),
-)
 _TASKS = {
-    "detect": ("", DetectionModel),
-    "segment": ("-seg", SegmentationModel),
+    "detect": DetectionModel,
+    "segment": SegmentationModel,
 }
-_CONTROLLED_ARCHITECTURE = re.compile(
-    r"^(yolov8|yolo11|yolo26)([nsmlx])(-seg)?\.yaml$",
-    flags=re.IGNORECASE,
-)
 
 
 class EncryptedYOLO(YOLO):
@@ -102,26 +97,28 @@ def create_yolo_architecture(
 ) -> EncryptedYOLO:
     """Build a new model only from an absolute, package-owned YOLO template."""
     target_device = _target_device(device, allow_cpu_for_tests=allow_cpu_for_tests)
-    match = _CONTROLLED_ARCHITECTURE.fullmatch(str(model_name).strip())
-    if match is None:
-        raise ValueError("只允许受控 YOLOv8/YOLO11/YOLO26 架构 YAML")
-    family, scale, segment_suffix = match.groups()
-    family = family.lower()
-    suffix, model_type = _TASKS.get(expected_task, (None, None))
-    if suffix is None or bool(segment_suffix) != (expected_task == "segment"):
-        raise ValueError(f"模型架构与训练任务不匹配: {model_name!r} / {expected_task!r}")
-    folder = dict(_FAMILIES)[family]
-    trusted_path = ROOT / "cfg" / "models" / folder / f"{family}{suffix}.yaml"
+    if expected_task not in _TASKS:
+        raise ValueError(f"不支持的 YOLO 任务: {expected_task}")
+    architecture = parse_controlled_architecture(
+        model_name,
+        expected_task=expected_task,
+    )
+    model_type = _TASKS[expected_task]
+    suffix = TASK_SUFFIXES[expected_task]
+    folder = FAMILY_FOLDERS[architecture.family]
+    trusted_path = (
+        ROOT / "cfg" / "models" / folder / f"{architecture.family}{suffix}.yaml"
+    )
     if not trusted_path.is_file():
         raise FileNotFoundError(f"Ultralytics 受控架构模板不存在: {trusted_path}")
     trusted_yaml = YAML.load(trusted_path)
     trusted_yaml.update(
-        scale=scale.lower(),
-        yaml_file=f"{family}{scale.lower()}{suffix}.yaml",
+        scale=architecture.scale,
+        yaml_file=f"{architecture.family}{architecture.scale}{suffix}.yaml",
         channels=3,
     )
     yolo = _build_yolo(trusted_path, trusted_yaml, model_type, expected_task)
-    yolo.model_name = str(model_name).lower()
+    yolo.model_name = architecture.name
     yolo.overrides["model"] = yolo.model_name
     yolo.to(target_device)
     return yolo
@@ -153,9 +150,10 @@ def _trusted_configuration(
             raise ValueError("加密模型类别名称包含不安全的路径字符")
 
     scale = container.model_yaml.get("scale")
-    if not isinstance(scale, str) or scale not in _SCALES:
+    if not isinstance(scale, str) or scale not in SCALES:
         raise ValueError(f"不支持的 YOLO 模型规模: {scale}")
-    suffix, model_type = _TASKS[expected_task]
+    suffix = TASK_SUFFIXES[expected_task]
+    model_type = _TASKS[expected_task]
     source_yaml = dict(container.model_yaml)
     if "ch" in source_yaml:
         legacy_channels = source_yaml.pop("ch")
@@ -164,7 +162,7 @@ def _trusted_configuration(
     source_filename = source_yaml.get("yaml_file", "")
     if not isinstance(source_filename, str) or len(source_filename) > 1024:
         raise ValueError("加密模型 yaml_file 元数据非法")
-    for family, folder in _FAMILIES:
+    for family, folder in FAMILY_FOLDERS.items():
         trusted_path = ROOT / "cfg" / "models" / folder / f"{family}{suffix}.yaml"
         if not trusted_path.is_file():
             continue
@@ -201,7 +199,7 @@ def load_yolo_container(
 
     target_device = _target_device(device, allow_cpu_for_tests=allow_cpu_for_tests)
 
-    kek, key_id = load_kek(key_dir=key_dir, model_path=path)
+    kek, key_id = load_kek(key_dir=key_dir)
     container = read_model_container(path, kek=kek)
     if container.key_id != key_id:
         raise ValueError(f"加密模型 key_id 不匹配: {container.key_id}")

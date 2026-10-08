@@ -1,5 +1,7 @@
-# `.niii-model` 密钥定位模板。复制为 config/model_crypto.yaml 后按环境修改。
+# `.niii-model` 密钥定位模板。复制为 config/model_crypto.yaml 后按环境修改；
+# 示例文件本身不会被运行时读取，也不会从 cwd/keys 或模型同级 keys 隐式查找。
 # KEK 本体不得写入本文件、模型目录或仓库；由环境变量或受限密钥文件注入。
+# Linux 建议 keys_dir=0700、kek.key=0600；init-kek 拒绝覆盖已有密钥。
 
 keys_dir: "/etc/niii/keys"
 kek_id: "default"

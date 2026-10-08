@@ -71,7 +71,7 @@ def _validate_pretrained_file(path: Path) -> Path:
     resolved = _ensure_under_model_roots(path)
     if not resolved.is_file():
         raise FileNotFoundError(f"预训练模型不存在: {resolved}")
-    if resolved.suffix.lower() != ".niii-model":
+    if resolved.suffix != ".niii-model":
         raise ValueError(f"预训练模型必须是 .niii-model 加密文件: {resolved}")
     if resolved.stat().st_size <= 0:
         raise ValueError(f"预训练模型文件为空: {resolved}")
@@ -92,8 +92,23 @@ def resolve_pretrained_model_path(value: object) -> str:
         raise ValueError("pretrained_model_path 仅支持共享文件系统路径，不支持 URL")
 
     requested = Path(text).expanduser()
-    candidate = requested if requested.is_absolute() else TRAINING_MODEL_ROOTS[0] / requested
-    candidate = _ensure_under_model_roots(candidate)
+    if requested.is_absolute():
+        candidate = _ensure_under_model_roots(requested)
+    else:
+        matches = [
+            _ensure_under(root / requested, root)
+            for root in TRAINING_MODEL_ROOTS
+            if (root / requested).exists()
+        ]
+        if not matches:
+            roots = ", ".join(str(root) for root in TRAINING_MODEL_ROOTS)
+            raise FileNotFoundError(
+                f"预训练模型地址不存在: {requested}；已检查: {roots}"
+            )
+        if len(matches) > 1:
+            paths = ", ".join(str(path) for path in matches)
+            raise ValueError(f"相对模型地址在多个允许根目录中存在，无法消歧: {paths}")
+        candidate = matches[0]
     if candidate.is_file():
         return str(_validate_pretrained_file(candidate))
     if not candidate.exists():
@@ -130,7 +145,7 @@ def baseline_model_from_last_train(last_train: str) -> str:
         raise ValueError(f"非法 last_train: {last_train!r}")
     if rel.startswith("storage/"):
         rel = rel[len("storage/") :]
-    storage = (PLATFORM_ROOT / "storage").resolve()
+    storage = STORAGE_ROOT.resolve()
     candidate = storage / rel / "weights" / "best.niii-model"
     return str(_validate_pretrained_file(_ensure_under(candidate, storage)))
 

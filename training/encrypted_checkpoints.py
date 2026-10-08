@@ -8,13 +8,9 @@ from ultralytics.utils.torch_utils import unwrap_model
 
 from toolkit.model_crypto.container_v1 import write_model_container
 from toolkit.model_crypto.envelope import load_kek
-
-_CONTAINER_TASK = {
-    "detection": "detect",
-    "segmentation": "segment",
-    "detect": "detect",
-    "segment": "segment",
-}
+from toolkit.model_crypto.yolo_contract import (
+    normalize_container_task,
+)
 
 
 def save_training_model(
@@ -25,9 +21,7 @@ def save_training_model(
     key_dir: str | Path | None = None,
 ) -> Path:
     """Write or atomically replace an encrypted inference-weight snapshot."""
-    container_task = _CONTAINER_TASK.get(str(task).strip().lower())
-    if container_task is None:
-        raise ValueError(f"不支持的加密训练任务: {task!r}")
+    container_task = normalize_container_task(task)
     destination = Path(destination)
     network = unwrap_model(model)
     model_yaml = getattr(network, "yaml", None)
@@ -37,7 +31,7 @@ def save_training_model(
     if not isinstance(model_names, dict):
         model_names = dict(enumerate(model_names))
 
-    kek, key_id = load_kek(key_dir=key_dir, model_path=destination)
+    kek, key_id = load_kek(key_dir=key_dir)
     return write_model_container(
         destination,
         state_dict=network.state_dict(),

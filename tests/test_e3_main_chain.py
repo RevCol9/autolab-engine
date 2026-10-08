@@ -228,7 +228,7 @@ class EncryptedTrainingArtifactContractTest(unittest.TestCase):
             best.parent.mkdir(parents=True)
             best.write_bytes(b"encrypted-container-placeholder")
             with (
-                patch("training.paths.PLATFORM_ROOT", root),
+                patch("training.paths.STORAGE_ROOT", root / "storage"),
                 patch("training.paths.TRAINING_MODEL_ROOTS", (root,)),
             ):
                 self.assertEqual(
