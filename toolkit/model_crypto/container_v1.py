@@ -372,6 +372,43 @@ def _decode_payload(payload: bytes | bytearray, key_id: str) -> ModelContainer:
     )
 
 
+def _validated_header(header: bytes, file_size: int) -> tuple[Any, ...]:
+    if len(header) < _HEADER.size:
+        raise ValueError("加密模型文件头不完整")
+    fields = _HEADER.unpack_from(header)
+    magic, version, flags, key_id_length, cipher_length, plain_length, *_ = fields
+    if magic != MAGIC or version != FORMAT_VERSION or flags != 0:
+        raise ValueError("不支持的加密模型文件头或版本")
+    if not 0 < key_id_length <= MAX_KEY_ID_BYTES:
+        raise ValueError("加密模型 key_id 长度非法")
+    if cipher_length != plain_length + 16 or plain_length > MAX_PLAINTEXT_BYTES:
+        raise ValueError("加密模型密文长度非法")
+    if file_size != _HEADER.size + key_id_length + cipher_length:
+        raise ValueError("加密模型文件长度与文件头不一致")
+    return fields
+
+
+def read_model_key_id(path: str | Path) -> str:
+    """Read the bounded, untrusted key hint used to select a historical KEK."""
+    path = Path(path)
+    try:
+        if path.suffix != ".niii-model":
+            raise ValueError("模型文件必须以 .niii-model 结尾")
+        with path.open("rb") as stream:
+            file_size = os.fstat(stream.fileno()).st_size
+            header = stream.read(_HEADER.size)
+            fields = _validated_header(header, file_size)
+            key_id_length = fields[3]
+            key_id_bytes = stream.read(key_id_length)
+            if len(key_id_bytes) != key_id_length:
+                raise ValueError("加密模型 key_id 不完整")
+        return validate_key_id(key_id_bytes.decode("utf-8"))
+    except ModelCryptoError:
+        raise
+    except (UnicodeError, ValueError) as exc:
+        raise ModelCryptoError(ModelCryptoError.FORMAT_INVALID, str(exc)) from exc
+
+
 def _read_model_container(
     path: str | Path,
     *,
@@ -391,20 +428,10 @@ def _read_model_container(
         data = stream.read(file_size)
         if len(data) != file_size or stream.read(1):
             raise ValueError("加密模型读取期间文件长度发生变化")
-    if len(data) < _HEADER.size:
-        raise ValueError("加密模型文件头不完整")
     (
         magic, version, flags, key_id_length, cipher_length, plain_length,
         wrap_nonce, payload_nonce, wrapped_dek,
-    ) = _HEADER.unpack_from(data)
-    if magic != MAGIC or version != FORMAT_VERSION or flags != 0:
-        raise ValueError("不支持的加密模型文件头或版本")
-    if not 0 < key_id_length <= MAX_KEY_ID_BYTES:
-        raise ValueError("加密模型 key_id 长度非法")
-    if cipher_length != plain_length + 16 or plain_length > MAX_PLAINTEXT_BYTES:
-        raise ValueError("加密模型密文长度非法")
-    if len(data) != _HEADER.size + key_id_length + cipher_length:
-        raise ValueError("加密模型文件长度与文件头不一致")
+    ) = _validated_header(data[: _HEADER.size], len(data))
     key_id_bytes = data[_HEADER.size : _HEADER.size + key_id_length]
     authenticated_header = data[: _HEADER.size + key_id_length]
     ciphertext = memoryview(data)[_HEADER.size + key_id_length :]
@@ -458,5 +485,5 @@ def read_model_container(path: str | Path, *, kek: bytes) -> ModelContainer:
 
 __all__ = [
     "FORMAT_VERSION", "MAGIC", "MAX_PLAINTEXT_BYTES", "ModelContainer",
-    "read_model_container", "write_model_container",
+    "read_model_container", "read_model_key_id", "write_model_container",
 ]

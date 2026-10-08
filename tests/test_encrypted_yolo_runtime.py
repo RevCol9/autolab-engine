@@ -278,7 +278,27 @@ class EncryptedYoloRuntimeTest(unittest.TestCase):
             load_yolo_container(
                 path, "cpu", "detect", key_dir=self.keys, allow_cpu_for_tests=True,
             )
-        self.assertEqual(ModelCryptoError.KEY_ID_MISMATCH, caught.exception.code)
+        self.assertEqual(ModelCryptoError.KEY_NOT_FOUND, caught.exception.code)
+
+    def test_historical_key_remains_loadable_after_active_key_rotation(self):
+        from toolkit.model_crypto import load_yolo_container
+        from toolkit.model_crypto.envelope import rotate_kek
+
+        path = self._write()
+        rotate_kek(self.keys, kek_id="next-key")
+
+        restored = load_yolo_container(
+            path,
+            "cpu",
+            "detect",
+            key_dir=self.keys,
+            allow_cpu_for_tests=True,
+        )
+
+        self.assertEqual(
+            set(self.models["detect"].model.state_dict()),
+            set(restored.model.state_dict()),
+        )
 
     def test_wrong_task_and_unsupported_yaml_are_rejected(self):
         from toolkit.model_crypto import ModelCryptoError, load_yolo_container

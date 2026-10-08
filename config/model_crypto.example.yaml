@@ -1,7 +1,8 @@
 # `.niii-model` 密钥定位模板。复制为 config/model_crypto.yaml 后按环境修改；
 # 示例文件本身不会被运行时读取，也不会从 cwd/keys 或模型同级 keys 隐式查找。
 # KEK 本体不得写入本文件、模型目录或仓库；由环境变量或受限密钥文件注入。
-# Linux 建议 keys_dir=0700、kek.key=0600；init-kek 拒绝覆盖已有密钥。
+# init-kek 创建 keyring/（0700）、历史 KEK 文件（0600）和 active 指针 kek_id.txt。
+# kek_file_name 仅用于首次 rotate-kek 自动迁移旧版单 KEK 目录，不是新 keyring 的 active 文件。
 
 keys_dir: "/etc/niii/keys"
 kek_id: "default"

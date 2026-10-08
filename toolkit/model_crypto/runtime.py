@@ -11,7 +11,11 @@ from ultralytics import YOLO
 from ultralytics.nn.tasks import DetectionModel, SegmentationModel
 from ultralytics.utils import ROOT, YAML
 
-from toolkit.model_crypto.container_v1 import ModelContainer, read_model_container
+from toolkit.model_crypto.container_v1 import (
+    ModelContainer,
+    read_model_container,
+    read_model_key_id,
+)
 from toolkit.model_crypto.envelope import load_kek
 from toolkit.model_crypto.errors import ModelCryptoError
 from toolkit.model_crypto.yolo_contract import (
@@ -242,7 +246,16 @@ def load_yolo_container(
     target_device = _target_device(device, allow_cpu_for_tests=allow_cpu_for_tests)
 
     try:
-        kek, key_id = load_kek(key_dir=key_dir)
+        model_key_id = read_model_key_id(path)
+    except ModelCryptoError:
+        raise
+    except OSError as exc:
+        raise ModelCryptoError(
+            ModelCryptoError.FORMAT_INVALID,
+            f"加密模型不可读: {path}: {exc}",
+        ) from exc
+    try:
+        kek, key_id = load_kek(key_dir=key_dir, key_id=model_key_id)
     except FileNotFoundError as exc:
         raise ModelCryptoError(ModelCryptoError.KEY_NOT_FOUND, str(exc)) from exc
     except PermissionError as exc:

@@ -82,7 +82,40 @@ class ModelCryptoKeyTest(unittest.TestCase):
         )
         self.assertEqual(0, completed.returncode, completed.stderr)
         self.assertIn("init-kek", completed.stdout)
+        self.assertIn("rotate-kek", completed.stdout)
+        self.assertIn("set-active-kek", completed.stdout)
+        self.assertIn("keyring-status", completed.stdout)
         self.assertNotIn("pack-v1", completed.stdout)
+
+    def test_keyring_cli_rotates_lists_and_rolls_back(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            keys = Path(tmp) / "keys"
+            base = [sys.executable, "-m", "toolkit.model_crypto"]
+            repository = Path(__file__).resolve().parents[1]
+            commands = (
+                [*base, "init-kek", "--keys", str(keys), "--kek-id", "old"],
+                [*base, "rotate-kek", "--keys", str(keys), "--kek-id", "new"],
+                [*base, "set-active-kek", "--keys", str(keys), "--kek-id", "old"],
+            )
+            for command in commands:
+                completed = subprocess.run(
+                    command,
+                    cwd=repository,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                self.assertEqual(0, completed.returncode, completed.stderr)
+
+            status = subprocess.run(
+                [*base, "keyring-status", "--keys", str(keys)],
+                cwd=repository,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(0, status.returncode, status.stderr)
+            self.assertEqual(["  new", "* old"], sorted(status.stdout.splitlines()))
 
     def test_key_config_rejects_path_like_file_names(self):
         with self.assertRaisesRegex(ValueError, "单层文件名"):
