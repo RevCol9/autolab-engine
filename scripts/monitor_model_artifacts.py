@@ -14,6 +14,7 @@ if str(REPO_ROOT) not in sys.path:
 from toolkit.model_crypto.artifact_monitor import (  # noqa: E402
     ArtifactMonitorConfig,
     DEFAULT_FORBIDDEN_SUFFIXES,
+    DEFAULT_MAX_EVENT_LOG_BYTES,
     LinuxInotifyArtifactMonitor,
     install_signal_handlers,
 )
@@ -34,6 +35,8 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--summary", type=Path, required=True, help="最终 JSON 汇总")
     parser.add_argument("--ready-file", type=Path, default=None)
     parser.add_argument("--stop-file", type=Path, default=None)
+    parser.add_argument("--lock-file", type=Path, default=None)
+    parser.add_argument("--parent-pid", type=int, default=None)
     parser.add_argument(
         "--forbid-suffix",
         action="append",
@@ -41,6 +44,12 @@ def _parser() -> argparse.ArgumentParser:
         help="禁止文件后缀；可重复指定，默认使用模型明文后缀集合",
     )
     parser.add_argument("--poll-interval", type=float, default=0.25)
+    parser.add_argument(
+        "--max-event-log-bytes",
+        type=int,
+        default=DEFAULT_MAX_EVENT_LOG_BYTES,
+        help="事件日志容量上限；超限时 fail closed",
+    )
     return parser
 
 
@@ -53,8 +62,11 @@ def main(argv: list[str] | None = None) -> int:
             summary=args.summary,
             ready_file=args.ready_file,
             stop_file=args.stop_file,
+            lock_file=args.lock_file,
+            parent_pid=args.parent_pid,
             forbidden_suffixes=args.forbid_suffix or DEFAULT_FORBIDDEN_SUFFIXES,
             poll_interval_sec=args.poll_interval,
+            max_event_log_bytes=args.max_event_log_bytes,
         )
         monitor = LinuxInotifyArtifactMonitor(config)
         install_signal_handlers(monitor)
@@ -69,7 +81,7 @@ def main(argv: list[str] | None = None) -> int:
     print(
         "模型工件监控失败: "
         f"forbidden={result.forbidden_event_count}, "
-        f"integrity={len(result.integrity_failures)}；汇总: {result.summary}",
+        f"integrity={result.integrity_failure_count}；汇总: {result.summary}",
         file=sys.stderr,
     )
     return 2

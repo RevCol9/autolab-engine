@@ -66,13 +66,13 @@ def artifact_monitor_status() -> dict[str, Any]:
 
 @router.get("/events")
 def artifact_monitor_events(
-    after_sequence: int = Query(0, alias="afterSequence", ge=0),
+    cursor: int = Query(0, ge=0),
     limit: int = Query(200, ge=1, le=1000),
 ) -> dict[str, Any]:
     """Read a bounded page of durable JSONL events."""
     try:
         return MONITOR_SERVICE.events(
-            after_sequence=after_sequence,
+            cursor=cursor,
             limit=limit,
         )
     except LookupError as exc:

@@ -73,7 +73,7 @@ def popen_train(
     with open(log_path, "w", encoding="utf-8") as log_fp:
         proc = subprocess.Popen(
             cmd,
-            cwd=cwd or "/tmp",
+            cwd=cwd or str(save_dir),
             stdout=log_fp,
             stderr=subprocess.STDOUT,
             start_new_session=True,

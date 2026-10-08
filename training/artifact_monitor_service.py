@@ -52,13 +52,28 @@ class _MonitorSession:
     run_root: Path
     temp_root: Path
     evidence_root: Path
-    event_log: Path
-    summary: Path
-    ready_file: Path
-    stop_file: Path
-    process_log: Path
     process: subprocess.Popen[Any]
     started_at: str
+
+    @property
+    def event_log(self) -> Path:
+        return self.evidence_root / "events.jsonl"
+
+    @property
+    def summary(self) -> Path:
+        return self.evidence_root / "summary.json"
+
+    @property
+    def ready_file(self) -> Path:
+        return self.evidence_root / "ready.json"
+
+    @property
+    def stop_file(self) -> Path:
+        return self.evidence_root / "stop"
+
+    @property
+    def process_log(self) -> Path:
+        return self.evidence_root / "monitor.log"
 
 
 def _utc_now() -> str:
@@ -135,6 +150,7 @@ class ArtifactMonitorService:
     def _temporary_environment(session: _MonitorSession) -> dict[str, str]:
         tmp_dir = str(session.temp_root / "tmp")
         return {
+            "HOME": str(session.temp_root / "home"),
             "TMPDIR": tmp_dir,
             "TMP": tmp_dir,
             "TEMP": tmp_dir,
@@ -221,6 +237,7 @@ class ArtifactMonitorService:
             temp_root.mkdir(parents=True, exist_ok=False)
             for directory_name in (
                 "tmp",
+                "home",
                 "torch-home",
                 "xdg-cache",
                 "matplotlib",
@@ -247,6 +264,10 @@ class ArtifactMonitorService:
                 str(ready_file),
                 "--stop-file",
                 str(stop_file),
+                "--lock-file",
+                str(self.evidence_root / ".monitor.lock"),
+                "--parent-pid",
+                str(os.getpid()),
             ]
             with process_log.open("x", encoding="utf-8") as log_stream:
                 process = subprocess.Popen(
@@ -257,7 +278,6 @@ class ArtifactMonitorService:
                     start_new_session=True,
                     env={**os.environ, "PYTHONUNBUFFERED": "1"},
                 )
-
             session = _MonitorSession(
                 session_id=session_id,
                 project_id=project_id,
@@ -266,27 +286,22 @@ class ArtifactMonitorService:
                 run_root=run_root,
                 temp_root=temp_root,
                 evidence_root=evidence_root,
-                event_log=event_log,
-                summary=summary,
-                ready_file=ready_file,
-                stop_file=stop_file,
-                process_log=process_log,
                 process=process,
                 started_at=_utc_now(),
             )
             self._session = session
 
             deadline = time.monotonic() + self.ready_timeout_sec
-            while not ready_file.is_file():
+            while not session.ready_file.is_file():
                 exit_code = process.poll()
                 if exit_code is not None:
                     raise RuntimeError(
-                        f"监控进程启动失败，exit_code={exit_code}，日志: {process_log}"
+                        f"监控进程启动失败，exit_code={exit_code}，日志: {session.process_log}"
                     )
                 if time.monotonic() >= deadline:
                     self._terminate(process, self.stop_timeout_sec)
                     raise TimeoutError(
-                        f"等待监控 ready 超时，日志: {process_log}"
+                        f"等待监控 ready 超时，日志: {session.process_log}"
                     )
                 time.sleep(0.05)
             return self._snapshot_locked(session)
@@ -313,9 +328,10 @@ class ArtifactMonitorService:
                     self._terminate(session.process, self.stop_timeout_sec)
             return self._snapshot_locked(session)
 
-    def events(self, *, after_sequence: int = 0, limit: int = 200) -> dict[str, Any]:
-        if after_sequence < 0:
-            raise ValueError("after_sequence 不能小于 0")
+    def events(self, *, cursor: int = 0, limit: int = 200) -> dict[str, Any]:
+        """Read new JSONL records from a byte cursor without rescanning history."""
+        if cursor < 0:
+            raise ValueError("cursor 不能小于 0")
         if not 1 <= limit <= 1000:
             raise ValueError("limit 必须位于 [1, 1000]")
         with self._lock:
@@ -326,30 +342,45 @@ class ArtifactMonitorService:
             session_id = session.session_id
 
         records: list[dict[str, Any]] = []
+        next_cursor = cursor
         if event_log.is_file():
             try:
-                with event_log.open("r", encoding="utf-8") as stream:
-                    for line_number, line in enumerate(stream, start=1):
+                size = event_log.stat().st_size
+                if cursor > size:
+                    raise ValueError(
+                        f"cursor 超出事件日志长度: cursor={cursor}, size={size}"
+                    )
+                with event_log.open("rb") as stream:
+                    if cursor:
+                        stream.seek(cursor - 1)
+                        if stream.read(1) != b"\n":
+                            raise ValueError("cursor 必须指向完整事件的边界")
+                    stream.seek(cursor)
+                    while len(records) < limit:
+                        line_start = stream.tell()
+                        line = stream.readline()
+                        if not line:
+                            break
+                        if not line.endswith(b"\n"):
+                            stream.seek(line_start)
+                            break
+                        next_cursor = stream.tell()
                         if not line.strip():
                             continue
                         try:
                             record = json.loads(line)
                         except json.JSONDecodeError as exc:
                             raise RuntimeError(
-                                f"事件证据第 {line_number} 行损坏: {event_log}"
+                                f"事件证据在字节 {line_start} 处损坏: {event_log}"
                             ) from exc
-                        sequence = int(record.get("sequence") or 0)
-                        if sequence <= after_sequence:
-                            continue
                         records.append(record)
-                        if len(records) >= limit:
-                            break
             except OSError as exc:
                 raise RuntimeError(f"事件证据不可读: {event_log}: {exc}") from exc
         return {
             "status": "ok",
             "sessionId": session_id,
-            "afterSequence": after_sequence,
+            "cursor": cursor,
+            "nextCursor": next_cursor,
             "count": len(records),
             "events": records,
         }

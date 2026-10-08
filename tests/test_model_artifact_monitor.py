@@ -12,6 +12,7 @@ from pathlib import Path
 from toolkit.model_crypto.artifact_monitor import (
     ArtifactMonitorConfig,
     LinuxInotifyArtifactMonitor,
+    _EvidenceWriter,
     _decode_inotify_buffer,
     _is_forbidden_path,
     _normalize_suffixes,
@@ -20,6 +21,18 @@ from toolkit.model_crypto.artifact_monitor import (
 
 
 class ArtifactMonitorUnitTest(unittest.TestCase):
+    def test_event_log_limit_fails_closed_but_allows_final_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            event_log = Path(tmp) / "events.jsonl"
+            writer = _EvidenceWriter(event_log, max_bytes=64)
+            with self.assertRaisesRegex(RuntimeError, "容量上限"):
+                writer.write("filesystem_event", path="x" * 200)
+            writer.write("monitor_error", error="limit reached", force=True)
+            writer.close()
+
+            records = [json.loads(line) for line in event_log.read_text().splitlines()]
+            self.assertEqual(["monitor_error"], [record["kind"] for record in records])
+
     def test_suffixes_are_normalized_and_temporary_forms_are_forbidden(self):
         suffixes = _normalize_suffixes(["PT", ".pth", "pt"])
         self.assertEqual((".pt", ".pth"), suffixes)

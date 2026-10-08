@@ -118,11 +118,24 @@ class ArtifactMonitorWebServiceTest(unittest.TestCase):
             self.assertEqual(environment["TMPDIR"], environment["TMP"])
             self.assertEqual(environment, started["environment"])
             self.assertTrue(Path(environment["TMPDIR"]).is_dir())
+            self.assertTrue(Path(environment["HOME"]).is_dir())
             self.assertTrue(Path(environment["TORCH_HOME"]).is_dir())
 
-            page = self.service.events(after_sequence=1, limit=10)
+            first_page = self.service.events(limit=1)
+            self.assertEqual(1, first_page["count"])
+            self.assertGreater(first_page["nextCursor"], 0)
+            page = self.service.events(
+                cursor=first_page["nextCursor"],
+                limit=10,
+            )
             self.assertEqual(1, page["count"])
             self.assertEqual(2, page["events"][0]["sequence"])
+            with self.assertRaisesRegex(ValueError, "完整事件的边界"):
+                self.service.events(cursor=1)
+
+            command = self.processes[0].command
+            self.assertIn("--lock-file", command)
+            self.assertIn("--parent-pid", command)
             process_log = self.service.process_log(tail=10)
             self.assertEqual(["monitor boot"], process_log["lines"])
 
@@ -192,6 +205,19 @@ class ArtifactMonitorWebServiceTest(unittest.TestCase):
         self.assertIn("监控进程日志", response.text)
         self.assertEqual("no-store", response.headers["cache-control"])
         self.assertIn("default-src 'self'", response.headers["content-security-policy"])
+        self.assertNotIn("unsafe-inline", response.headers["content-security-policy"])
+
+        script = TestClient(app).get("/monitor/model-artifacts/assets/app.js")
+        stylesheet = TestClient(app).get(
+            "/monitor/model-artifacts/assets/styles.css"
+        )
+        self.assertEqual(200, script.status_code)
+        self.assertIn("nextCursor", script.text)
+        self.assertEqual(200, stylesheet.status_code)
+        self.assertIn(".summary-grid", stylesheet.text)
+
+        missing = TestClient(app).get("/monitor/model-artifacts/assets/unknown.js")
+        self.assertEqual(404, missing.status_code)
 
 
 class TrainingMonitorEnvironmentTest(unittest.TestCase):
@@ -229,6 +255,7 @@ class TrainingMonitorEnvironmentTest(unittest.TestCase):
             environment = popen.call_args.kwargs["env"]
             self.assertEqual("/watched/tmp", environment["TMPDIR"])
             self.assertEqual("1", environment["PYTHONUNBUFFERED"])
+            self.assertEqual(str(save_dir), popen.call_args.kwargs["cwd"])
 
 
 if __name__ == "__main__":

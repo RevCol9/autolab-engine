@@ -25,6 +25,9 @@ DEFAULT_FORBIDDEN_SUFFIXES = (
     ".pth",
     ".safetensors",
 )
+DEFAULT_MAX_EVENT_LOG_BYTES = 256 * 1024 * 1024
+MAX_RECORDED_FORBIDDEN_PATHS = 1_000
+MAX_RECORDED_INTEGRITY_FAILURES = 100
 
 _IN_ATTRIB = 0x00000004
 _IN_CLOSE_WRITE = 0x00000008
@@ -164,7 +167,10 @@ class ArtifactMonitorConfig:
     forbidden_suffixes: tuple[str, ...] = DEFAULT_FORBIDDEN_SUFFIXES
     ready_file: Path | None = None
     stop_file: Path | None = None
+    lock_file: Path | None = None
+    parent_pid: int | None = None
     poll_interval_sec: float = 0.25
+    max_event_log_bytes: int = DEFAULT_MAX_EVENT_LOG_BYTES
 
     @classmethod
     def build(
@@ -176,7 +182,10 @@ class ArtifactMonitorConfig:
         forbidden_suffixes: Iterable[str] = DEFAULT_FORBIDDEN_SUFFIXES,
         ready_file: str | Path | None = None,
         stop_file: str | Path | None = None,
+        lock_file: str | Path | None = None,
+        parent_pid: int | None = None,
         poll_interval_sec: float = 0.25,
+        max_event_log_bytes: int = DEFAULT_MAX_EVENT_LOG_BYTES,
     ) -> ArtifactMonitorConfig:
         resolved_roots = tuple(
             dict.fromkeys(Path(root).expanduser().resolve() for root in roots)
@@ -188,21 +197,28 @@ class ArtifactMonitorConfig:
                 raise FileNotFoundError(f"监控根目录不存在或不是目录: {root}")
         if not 0.01 <= poll_interval_sec <= 60.0:
             raise ValueError("poll_interval_sec 必须位于 [0.01, 60]")
+        if not 1024 * 1024 <= max_event_log_bytes <= 16 * 1024**3:
+            raise ValueError("max_event_log_bytes 必须位于 [1 MiB, 16 GiB]")
+        if parent_pid is not None and parent_pid <= 1:
+            raise ValueError("parent_pid 必须是大于 1 的进程 ID")
 
         resolved_event_log = Path(event_log).expanduser().resolve()
         resolved_summary = Path(summary).expanduser().resolve()
         resolved_ready = Path(ready_file).expanduser().resolve() if ready_file else None
         resolved_stop = Path(stop_file).expanduser().resolve() if stop_file else None
+        resolved_lock = Path(lock_file).expanduser().resolve() if lock_file else None
         evidence_paths = tuple(
             path
             for path in (resolved_event_log, resolved_summary, resolved_ready)
             if path
         )
         control_paths = tuple(
-            path for path in (*evidence_paths, resolved_stop) if path is not None
+            path
+            for path in (*evidence_paths, resolved_stop, resolved_lock)
+            if path is not None
         )
         if len(set(control_paths)) != len(control_paths):
-            raise ValueError("事件、汇总、ready 和 stop 路径必须彼此不同")
+            raise ValueError("事件、汇总、ready、stop 和 lock 路径必须彼此不同")
         for control_path in control_paths:
             if any(_is_within(control_path, root) for root in resolved_roots):
                 raise ValueError(
@@ -221,7 +237,10 @@ class ArtifactMonitorConfig:
             forbidden_suffixes=_normalize_suffixes(forbidden_suffixes),
             ready_file=resolved_ready,
             stop_file=resolved_stop,
+            lock_file=resolved_lock,
+            parent_pid=parent_pid,
             poll_interval_sec=float(poll_interval_sec),
+            max_event_log_bytes=int(max_event_log_bytes),
         )
 
 
@@ -231,6 +250,7 @@ class ArtifactMonitorResult:
     summary: Path
     event_log: Path
     forbidden_event_count: int
+    integrity_failure_count: int
     integrity_failures: tuple[str, ...]
 
     @property
@@ -239,13 +259,16 @@ class ArtifactMonitorResult:
 
 
 class _EvidenceWriter:
-    def __init__(self, path: Path):
+    def __init__(self, path: Path, max_bytes: int):
         path.parent.mkdir(parents=True, exist_ok=True)
         self.path = path
         self._stream = path.open("x", encoding="utf-8")
         self._sequence = 0
+        self._max_bytes = max_bytes
+        self._bytes_written = 0
+        self._last_sync = time.monotonic()
 
-    def write(self, kind: str, **fields: Any) -> None:
+    def write(self, kind: str, *, force: bool = False, **fields: Any) -> None:
         self._sequence += 1
         record = {
             "schemaVersion": 1,
@@ -255,12 +278,27 @@ class _EvidenceWriter:
             "kind": kind,
             **fields,
         }
-        self._stream.write(json.dumps(record, ensure_ascii=True, sort_keys=True) + "\n")
+        line = json.dumps(record, ensure_ascii=True, sort_keys=True) + "\n"
+        encoded_size = len(line.encode("utf-8"))
+        if not force and self._bytes_written + encoded_size > self._max_bytes:
+            self._sequence -= 1
+            raise RuntimeError(
+                f"事件证据超过容量上限 {self._max_bytes} bytes"
+            )
+        self._stream.write(line)
+        self._stream.flush()
+        self._bytes_written += encoded_size
+        if force or time.monotonic() - self._last_sync >= 0.25:
+            self.sync()
+
+    def sync(self) -> None:
         self._stream.flush()
         os.fsync(self._stream.fileno())
+        self._last_sync = time.monotonic()
 
     def close(self) -> None:
         if not self._stream.closed:
+            self.sync()
             self._stream.close()
 
 
@@ -274,18 +312,39 @@ class LinuxInotifyArtifactMonitor:
         self._stop_requested = threading.Event()
         self._stop_reason = "requested"
         self._fd = -1
+        self._lock_stream: Any | None = None
         self._wd_to_path: dict[int, Path] = {}
         self._path_to_wd: dict[Path, int] = {}
         self._writer: _EvidenceWriter | None = None
         self._filesystem_event_count = 0
         self._forbidden_event_count = 0
         self._forbidden_paths: set[str] = set()
+        self._forbidden_paths_truncated = False
+        self._integrity_failure_count = 0
         self._integrity_failures: list[str] = []
         self._started_at = _utc_now()
 
     def request_stop(self, reason: str = "requested") -> None:
         self._stop_reason = reason
         self._stop_requested.set()
+
+    def _acquire_process_lock(self) -> None:
+        if self.config.lock_file is None:
+            return
+        import fcntl
+
+        self.config.lock_file.parent.mkdir(parents=True, exist_ok=True)
+        stream = self.config.lock_file.open("a+", encoding="utf-8")
+        try:
+            fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            stream.close()
+            raise RuntimeError("已有模型工件监控进程持有单实例锁") from None
+        self._lock_stream = stream
+
+    def _parent_exited(self) -> bool:
+        parent_pid = self.config.parent_pid
+        return parent_pid is not None and os.getppid() != parent_pid
 
     def _open_inotify(self) -> None:
         libc = ctypes.CDLL(None, use_errno=True)
@@ -333,7 +392,11 @@ class LinuxInotifyArtifactMonitor:
 
     def _record_forbidden(self, path: Path, *, phase: str, event: str) -> None:
         self._forbidden_event_count += 1
-        self._forbidden_paths.add(str(path))
+        path_text = str(path)
+        if len(self._forbidden_paths) < MAX_RECORDED_FORBIDDEN_PATHS:
+            self._forbidden_paths.add(path_text)
+        elif path_text not in self._forbidden_paths:
+            self._forbidden_paths_truncated = True
         assert self._writer is not None
         self._writer.write(
             "forbidden_artifact",
@@ -341,6 +404,13 @@ class LinuxInotifyArtifactMonitor:
             event=event,
             path=str(path),
         )
+
+    def _record_integrity_failure(self, message: str) -> None:
+        self._integrity_failure_count += 1
+        if len(self._integrity_failures) < MAX_RECORDED_INTEGRITY_FAILURES:
+            self._integrity_failures.append(message)
+        assert self._writer is not None
+        self._writer.write("monitor_integrity_failure", message=message)
 
     def _scan_tree(self, root: Path, *, phase: str) -> None:
         try:
@@ -353,9 +423,7 @@ class LinuxInotifyArtifactMonitor:
                     self._record_forbidden(path.resolve(), phase=phase, event="SCAN")
         except OSError as exc:
             failure = f"{phase} 扫描失败: {root}: {exc}"
-            self._integrity_failures.append(failure)
-            assert self._writer is not None
-            self._writer.write("monitor_integrity_failure", message=failure)
+            self._record_integrity_failure(failure)
 
     def _write_ready_file(self) -> None:
         if self.config.ready_file is None:
@@ -373,15 +441,13 @@ class LinuxInotifyArtifactMonitor:
         assert self._writer is not None
         if mask & _IN_Q_OVERFLOW:
             failure = "inotify 事件队列溢出，监控证据不完整"
-            self._integrity_failures.append(failure)
-            self._writer.write("monitor_integrity_failure", message=failure)
+            self._record_integrity_failure(failure)
             return
 
         watched_directory = self._wd_to_path.get(descriptor)
         if watched_directory is None:
             failure = f"收到未知 watch descriptor: {descriptor}"
-            self._integrity_failures.append(failure)
-            self._writer.write("monitor_integrity_failure", message=failure)
+            self._record_integrity_failure(failure)
             return
 
         path = watched_directory / name if name else watched_directory
@@ -411,14 +477,12 @@ class LinuxInotifyArtifactMonitor:
                     self._scan_tree(path, phase="dynamic")
             except OSError as exc:
                 failure = f"新增目录监听失败: {path}: {exc}"
-                self._integrity_failures.append(failure)
-                self._writer.write("monitor_integrity_failure", message=failure)
+                self._record_integrity_failure(failure)
 
         if mask & (_IN_DELETE_SELF | _IN_MOVE_SELF | _IN_UNMOUNT):
             if path in self.config.roots:
                 failure = f"监控根目录丢失或卸载: {path}"
-                self._integrity_failures.append(failure)
-                self._writer.write("monitor_integrity_failure", message=failure)
+                self._record_integrity_failure(failure)
 
         if mask & _IN_IGNORED:
             removed = self._wd_to_path.pop(descriptor, None)
@@ -446,7 +510,7 @@ class LinuxInotifyArtifactMonitor:
 
     def _build_summary(self, *, error: str | None = None) -> dict[str, Any]:
         event_log_sha256 = _sha256_file(self.config.event_log)
-        failed = bool(self._forbidden_event_count or self._integrity_failures or error)
+        failed = bool(self._forbidden_event_count or self._integrity_failure_count or error)
         return {
             "schemaVersion": 1,
             "status": "failed" if failed else "passed",
@@ -463,14 +527,23 @@ class LinuxInotifyArtifactMonitor:
             "filesystemEventCount": self._filesystem_event_count,
             "forbiddenEventCount": self._forbidden_event_count,
             "forbiddenPaths": sorted(self._forbidden_paths),
+            "forbiddenPathsTruncated": self._forbidden_paths_truncated,
+            "integrityFailureCount": self._integrity_failure_count,
             "integrityFailures": list(self._integrity_failures),
+            "integrityFailuresTruncated": (
+                self._integrity_failure_count > len(self._integrity_failures)
+            ),
             "error": error,
         }
 
     def run(self) -> ArtifactMonitorResult:
         error: str | None = None
-        self._writer = _EvidenceWriter(self.config.event_log)
+        self._writer = _EvidenceWriter(
+            self.config.event_log,
+            self.config.max_event_log_bytes,
+        )
         try:
+            self._acquire_process_lock()
             self._open_inotify()
             for root in self.config.roots:
                 self._add_tree(root)
@@ -482,34 +555,51 @@ class LinuxInotifyArtifactMonitor:
             )
             for root in self.config.roots:
                 self._scan_tree(root, phase="initial")
+            self._writer.sync()
             self._write_ready_file()
 
             with selectors.DefaultSelector() as selector:
                 selector.register(self._fd, selectors.EVENT_READ)
                 while not self._stop_requested.is_set():
+                    if self._parent_exited():
+                        self._stop_reason = "parent_exit"
+                        self._record_integrity_failure(
+                            "启动监控的父进程已退出，证据链提前终止"
+                        )
+                        break
                     if self._stop_file_requested():
                         self._stop_reason = "stop_file"
                         break
                     if selector.select(self.config.poll_interval_sec):
                         self._read_events()
                 self._read_events()
+            if self._stop_reason in {"SIGINT", "SIGTERM"}:
+                self._record_integrity_failure(
+                    f"监控收到非受控停止信号: {self._stop_reason}"
+                )
             for root in self.config.roots:
                 self._scan_tree(root, phase="final")
         except Exception as exc:  # report monitor failures instead of losing evidence
             error = f"{type(exc).__name__}: {exc}"
-            self._integrity_failures.append(error)
-            self._writer.write("monitor_error", error=error)
+            self._integrity_failure_count += 1
+            if len(self._integrity_failures) < MAX_RECORDED_INTEGRITY_FAILURES:
+                self._integrity_failures.append(error)
+            self._writer.write("monitor_error", error=error, force=True)
         finally:
             if self._fd >= 0:
                 os.close(self._fd)
                 self._fd = -1
             self._writer.write(
                 "monitor_stopped",
+                force=True,
                 stopReason=self._stop_reason,
                 forbiddenEventCount=self._forbidden_event_count,
-                integrityFailureCount=len(self._integrity_failures),
+                integrityFailureCount=self._integrity_failure_count,
             )
             self._writer.close()
+            if self._lock_stream is not None:
+                self._lock_stream.close()
+                self._lock_stream = None
 
         summary = self._build_summary(error=error)
         _write_json_atomic(self.config.summary, summary)
@@ -518,6 +608,7 @@ class LinuxInotifyArtifactMonitor:
             summary=self.config.summary,
             event_log=self.config.event_log,
             forbidden_event_count=self._forbidden_event_count,
+            integrity_failure_count=self._integrity_failure_count,
             integrity_failures=tuple(self._integrity_failures),
         )
 
@@ -536,6 +627,7 @@ __all__ = [
     "ArtifactMonitorConfig",
     "ArtifactMonitorResult",
     "DEFAULT_FORBIDDEN_SUFFIXES",
+    "DEFAULT_MAX_EVENT_LOG_BYTES",
     "LinuxInotifyArtifactMonitor",
     "install_signal_handlers",
 ]

@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>NIII 模型文件安全监控</title>
+  <link rel="stylesheet" href="/monitor/model-artifacts/assets/styles.css">
+</head>
+<body>
+  <header>
+    <div>
+      <p class="eyebrow">NIII MODEL SECURITY</p>
+      <h1>模型文件事件监控</h1>
+      <p>独立 Linux inotify 进程，记录训练目录和受控临时目录中的文件事件。</p>
+    </div>
+    <span id="connection" class="badge neutral">正在连接</span>
+  </header>
+
+  <main>
+    <section class="panel controls">
+      <form id="monitor-form">
+        <label>项目 ID<input id="project-id" required autocomplete="off"></label>
+        <label>任务 ID<input id="task-id" required autocomplete="off"></label>
+        <label>训练批次<input id="train-num" required autocomplete="off"></label>
+        <button id="start-button" type="submit">启动监控</button>
+        <button id="stop-button" type="button" class="secondary">停止并生成汇总</button>
+      </form>
+      <label class="refresh"><input id="auto-refresh" type="checkbox" checked> 每秒自动刷新</label>
+      <p id="alert" class="alert" hidden></p>
+    </section>
+
+    <section class="summary-grid" aria-label="监控状态">
+      <article class="panel metric"><span>状态</span><strong id="status">IDLE</strong></article>
+      <article class="panel metric"><span>文件事件</span><strong id="event-count">0</strong></article>
+      <article class="panel metric danger"><span>明文违规</span><strong id="forbidden-count">0</strong></article>
+      <article class="panel metric danger"><span>完整性失败</span><strong id="integrity-count">0</strong></article>
+    </section>
+
+    <section class="panel details">
+      <h2>当前会话</h2>
+      <dl>
+        <dt>会话</dt><dd id="session-id">—</dd>
+        <dt>PID</dt><dd id="pid">—</dd>
+        <dt>监控根目录</dt><dd id="roots">—</dd>
+        <dt>证据目录</dt><dd id="evidence-root">—</dd>
+      </dl>
+    </section>
+
+    <section class="panel stream">
+      <div class="section-title">
+        <div><h2>实时文件事件</h2><p>页面仅保留最近 500 条；违规累计值不会随列表清空。</p></div>
+        <button id="clear-events" type="button" class="secondary small">清空显示</button>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>#</th><th>时间</th><th>类型</th><th>事件</th><th>路径</th></tr></thead>
+          <tbody id="events"><tr><td colspan="5" class="empty">暂无事件</td></tr></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="panel stream">
+      <div class="section-title"><div><h2>监控进程日志</h2><p>最多读取日志末尾 200 行、1 MiB。</p></div></div>
+      <pre id="process-log">暂无日志</pre>
+    </section>
+  </main>
+
+  <script src="/monitor/model-artifacts/assets/app.js" defer></script>
+</body>
+</html>
