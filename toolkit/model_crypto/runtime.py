@@ -13,6 +13,7 @@ from ultralytics.utils import ROOT, YAML
 
 from toolkit.model_crypto.container_v1 import ModelContainer, read_model_container
 from toolkit.model_crypto.envelope import load_kek
+from toolkit.model_crypto.errors import ModelCryptoError
 from toolkit.model_crypto.yolo_contract import (
     FAMILY_FOLDERS,
     SCALES,
@@ -58,13 +59,28 @@ def _target_device(
         normalized = "cuda:0"
     elif normalized.isdigit():
         normalized = f"cuda:{normalized}"
-    target = torch.device(normalized)
+    try:
+        target = torch.device(normalized)
+    except (RuntimeError, ValueError) as exc:
+        raise ModelCryptoError(
+            ModelCryptoError.DEVICE_UNAVAILABLE,
+            f"不支持的模型设备: {device!r}",
+        ) from exc
     if target.type not in {"cpu", "cuda"}:
-        raise ValueError(f"不支持的模型设备: {target}")
+        raise ModelCryptoError(
+            ModelCryptoError.DEVICE_UNAVAILABLE,
+            f"不支持的模型设备: {target}",
+        )
     if target.type == "cpu" and not allow_cpu_for_tests:
-        raise RuntimeError("首版加密模型运行时必须使用 CUDA；CPU 仅限显式测试模式")
+        raise ModelCryptoError(
+            ModelCryptoError.DEVICE_UNAVAILABLE,
+            "首版加密模型运行时必须使用 CUDA；CPU 仅限显式测试模式",
+        )
     if target.type == "cuda" and not torch.cuda.is_available():
-        raise RuntimeError("指定 CUDA 设备不可用，不回退到 CPU")
+        raise ModelCryptoError(
+            ModelCryptoError.DEVICE_UNAVAILABLE,
+            "指定 CUDA 设备不可用，不回退到 CPU",
+        )
     return target
 
 
@@ -98,11 +114,19 @@ def create_yolo_architecture(
     """Build a new model only from an absolute, package-owned YOLO template."""
     target_device = _target_device(device, allow_cpu_for_tests=allow_cpu_for_tests)
     if expected_task not in _TASKS:
-        raise ValueError(f"不支持的 YOLO 任务: {expected_task}")
-    architecture = parse_controlled_architecture(
-        model_name,
-        expected_task=expected_task,
-    )
+        raise ModelCryptoError(
+            ModelCryptoError.TASK_MISMATCH,
+            f"不支持的 YOLO 任务: {expected_task}",
+        )
+    try:
+        architecture = parse_controlled_architecture(model_name)
+    except ValueError as exc:
+        raise ModelCryptoError(ModelCryptoError.ARCH_UNSUPPORTED, str(exc)) from exc
+    if architecture.task != expected_task:
+        raise ModelCryptoError(
+            ModelCryptoError.TASK_MISMATCH,
+            f"模型架构与任务不匹配: {model_name!r} / {expected_task!r}",
+        )
     model_type = _TASKS[expected_task]
     suffix = TASK_SUFFIXES[expected_task]
     folder = FAMILY_FOLDERS[architecture.family]
@@ -110,17 +134,26 @@ def create_yolo_architecture(
         ROOT / "cfg" / "models" / folder / f"{architecture.family}{suffix}.yaml"
     )
     if not trusted_path.is_file():
-        raise FileNotFoundError(f"Ultralytics 受控架构模板不存在: {trusted_path}")
+        raise ModelCryptoError(
+            ModelCryptoError.ARCH_UNSUPPORTED,
+            f"Ultralytics 受控架构模板不存在: {trusted_path}",
+        )
     trusted_yaml = YAML.load(trusted_path)
     trusted_yaml.update(
         scale=architecture.scale,
         yaml_file=f"{architecture.family}{architecture.scale}{suffix}.yaml",
         channels=3,
     )
-    yolo = _build_yolo(trusted_path, trusted_yaml, model_type, expected_task)
+    try:
+        yolo = _build_yolo(trusted_path, trusted_yaml, model_type, expected_task)
+    except (RuntimeError, ValueError) as exc:
+        raise ModelCryptoError(ModelCryptoError.ARCH_UNSUPPORTED, str(exc)) from exc
     yolo.model_name = architecture.name
     yolo.overrides["model"] = yolo.model_name
-    yolo.to(target_device)
+    try:
+        yolo.to(target_device)
+    except (RuntimeError, ValueError) as exc:
+        raise ModelCryptoError(ModelCryptoError.DEVICE_UNAVAILABLE, str(exc)) from exc
     return yolo
 
 
@@ -129,9 +162,15 @@ def _trusted_configuration(
     expected_task: str,
 ) -> tuple[Path, dict[str, Any], type[DetectionModel]]:
     if expected_task not in _TASKS:
-        raise ValueError(f"不支持的 YOLO 任务: {expected_task}")
+        raise ModelCryptoError(
+            ModelCryptoError.TASK_MISMATCH,
+            f"不支持的 YOLO 任务: {expected_task}",
+        )
     if container.task != expected_task:
-        raise ValueError(f"加密模型任务不匹配: 期望 {expected_task}，实际 {container.task}")
+        raise ModelCryptoError(
+            ModelCryptoError.TASK_MISMATCH,
+            f"加密模型任务不匹配: 期望 {expected_task}，实际 {container.task}",
+        )
 
     nc = container.model_yaml.get("nc")
     if type(nc) is not int or not 1 <= nc <= 1024:
@@ -195,37 +234,87 @@ def load_yolo_container(
     """
     path = Path(path)
     if path.suffix != ".niii-model":
-        raise ValueError("运行时只接受 .niii-model 模型文件")
+        raise ModelCryptoError(
+            ModelCryptoError.FORMAT_INVALID,
+            "运行时只接受 .niii-model 模型文件",
+        )
 
     target_device = _target_device(device, allow_cpu_for_tests=allow_cpu_for_tests)
 
-    kek, key_id = load_kek(key_dir=key_dir)
-    container = read_model_container(path, kek=kek)
+    try:
+        kek, key_id = load_kek(key_dir=key_dir)
+    except FileNotFoundError as exc:
+        raise ModelCryptoError(ModelCryptoError.KEY_NOT_FOUND, str(exc)) from exc
+    except PermissionError as exc:
+        raise ModelCryptoError(ModelCryptoError.KEY_INSECURE, str(exc)) from exc
+    except ValueError as exc:
+        raise ModelCryptoError(ModelCryptoError.KEY_INVALID, str(exc)) from exc
+    try:
+        container = read_model_container(path, kek=kek)
+    except ModelCryptoError:
+        raise
+    except OSError as exc:
+        raise ModelCryptoError(
+            ModelCryptoError.FORMAT_INVALID,
+            f"加密模型不可读: {path}: {exc}",
+        ) from exc
     if container.key_id != key_id:
-        raise ValueError(f"加密模型 key_id 不匹配: {container.key_id}")
-    trusted_path, trusted_yaml, model_type = _trusted_configuration(container, expected_task)
+        raise ModelCryptoError(
+            ModelCryptoError.KEY_ID_MISMATCH,
+            f"加密模型 key_id 不匹配: {container.key_id}",
+        )
+    try:
+        trusted_path, trusted_yaml, model_type = _trusted_configuration(
+            container,
+            expected_task,
+        )
+    except ModelCryptoError:
+        raise
+    except ValueError as exc:
+        raise ModelCryptoError(ModelCryptoError.ARCH_UNSUPPORTED, str(exc)) from exc
 
     # An absolute package YAML path avoids cwd shadowing or implicit .pt downloads.
-    yolo = _build_yolo(trusted_path, trusted_yaml, model_type, expected_task)
+    try:
+        yolo = _build_yolo(trusted_path, trusted_yaml, model_type, expected_task)
+    except (RuntimeError, ValueError) as exc:
+        raise ModelCryptoError(ModelCryptoError.ARCH_UNSUPPORTED, str(exc)) from exc
     network = yolo.model
     network.names = dict(container.model_names)
 
     expected_state = network.state_dict()
     if set(container.state_dict) != set(expected_state):
-        raise ValueError("加密模型 state_dict 键与架构不匹配")
+        raise ModelCryptoError(
+            ModelCryptoError.ARCH_UNSUPPORTED,
+            "加密模型 state_dict 键与架构不匹配",
+        )
     for name, tensor in container.state_dict.items():
         reference = expected_state[name]
         if tensor.shape != reference.shape:
-            raise ValueError(f"加密模型 tensor shape 不匹配: {name}")
+            raise ModelCryptoError(
+                ModelCryptoError.ARCH_UNSUPPORTED,
+                f"加密模型 tensor shape 不匹配: {name}",
+            )
         if reference.is_floating_point():
             if not tensor.is_floating_point():
-                raise ValueError(f"加密模型 tensor dtype 不匹配: {name}")
+                raise ModelCryptoError(
+                    ModelCryptoError.ARCH_UNSUPPORTED,
+                    f"加密模型 tensor dtype 不匹配: {name}",
+                )
         elif tensor.dtype != reference.dtype:
-            raise ValueError(f"加密模型 tensor dtype 不匹配: {name}")
-    network.load_state_dict(container.state_dict, strict=True, assign=True)
+            raise ModelCryptoError(
+                ModelCryptoError.ARCH_UNSUPPORTED,
+                f"加密模型 tensor dtype 不匹配: {name}",
+            )
+    try:
+        network.load_state_dict(container.state_dict, strict=True, assign=True)
+    except RuntimeError as exc:
+        raise ModelCryptoError(ModelCryptoError.ARCH_UNSUPPORTED, str(exc)) from exc
     yolo.model_name = str(path)
     yolo.overrides["model"] = str(path)
-    yolo.to(target_device)
+    try:
+        yolo.to(target_device)
+    except (RuntimeError, ValueError) as exc:
+        raise ModelCryptoError(ModelCryptoError.DEVICE_UNAVAILABLE, str(exc)) from exc
     return yolo
 
 

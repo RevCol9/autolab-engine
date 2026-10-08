@@ -17,7 +17,7 @@ import torch
 from ultralytics import YOLO
 
 from toolkit.model_crypto.container_v1 import read_model_container
-from toolkit.model_crypto.offline_convert import convert_trusted_pt
+from scripts.convert_trusted_model import convert_trusted_pt
 
 T = TypeVar("T")
 

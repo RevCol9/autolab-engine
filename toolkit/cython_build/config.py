@@ -65,6 +65,7 @@ class CythonBuildConfig:
                 "training/",
                 "shared/",
                 "toolkit/data_clean/",
+                "toolkit/model_crypto/",
             ),
             entry_scripts=(
                 "run.py",
@@ -73,6 +74,7 @@ class CythonBuildConfig:
             never_compile_extra=frozenset(),
             config_files=(
                 "config/annotation.example.yaml",
+                "config/model_crypto.example.yaml",
                 "config/training/base.example.yaml",
                 "config/training/detection.example.yaml",
                 "config/training/segmentation.example.yaml",

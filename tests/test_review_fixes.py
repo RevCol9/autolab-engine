@@ -392,6 +392,8 @@ class CythonPackageConfigTest(unittest.TestCase):
         config = CythonBuildConfig.autolab_engine(Path.cwd())
         self.assertIn("api/", config.production_targets)
         self.assertIn("toolkit/data_clean/", config.production_targets)
+        self.assertIn("toolkit/model_crypto/", config.production_targets)
+        self.assertNotIn("scripts/convert_trusted_model.py", config.production_targets)
         self.assertNotIn("toolkit", config.skip_dirs)
 
 

@@ -77,6 +77,7 @@ class ModelContainerV1Test(unittest.TestCase):
 
     def test_authenticated_header_key_id_and_ciphertext_tampering_is_rejected(self):
         from toolkit.model_crypto.container_v1 import read_model_container
+        from toolkit.model_crypto.errors import ModelCryptoError
 
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "model.niii-model"
@@ -95,20 +96,22 @@ class ModelContainerV1Test(unittest.TestCase):
                     damaged = bytearray(original)
                     damaged[position] ^= 1
                     path.write_bytes(damaged)
-                    with self.assertRaisesRegex(ValueError, "认证失败"):
+                    with self.assertRaisesRegex(ModelCryptoError, "认证失败"):
                         read_model_container(path, kek=self.kek)
 
     def test_wrong_key_is_rejected_before_payload_parsing(self):
         from toolkit.model_crypto.container_v1 import read_model_container
+        from toolkit.model_crypto.errors import ModelCryptoError
 
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "model.niii-model"
             self._write(path)
-            with self.assertRaisesRegex(ValueError, "认证失败"):
+            with self.assertRaisesRegex(ModelCryptoError, "认证失败"):
                 read_model_container(path, kek=b"x" * 32)
 
     def test_truncated_or_extended_file_is_rejected(self):
         from toolkit.model_crypto.container_v1 import read_model_container
+        from toolkit.model_crypto.errors import ModelCryptoError
 
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "model.niii-model"
@@ -120,7 +123,7 @@ class ModelContainerV1Test(unittest.TestCase):
             ):
                 with self.subTest(name=name):
                     path.write_bytes(damaged)
-                    with self.assertRaisesRegex(ValueError, "长度"):
+                    with self.assertRaisesRegex(ModelCryptoError, "长度"):
                         read_model_container(path, kek=self.kek)
 
     def test_small_model_read_does_not_reserve_the_one_gib_limit(self):
@@ -264,7 +267,7 @@ class ModelContainerV1Test(unittest.TestCase):
         from ultralytics import YOLO
 
         from toolkit.model_crypto.container_v1 import read_model_container
-        from toolkit.model_crypto.offline_convert import convert_trusted_pt
+        from scripts.convert_trusted_model import convert_trusted_pt
 
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

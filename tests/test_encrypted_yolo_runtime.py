@@ -32,7 +32,7 @@ class EncryptedYoloRuntimeTest(unittest.TestCase):
     def _write(
         self, task="detect", *, model=None, model_yaml=None, model_names=None, state_dict=None
     ):
-        from toolkit.model_crypto import write_model_container
+        from toolkit.model_crypto.container_v1 import write_model_container
 
         source = model if model is not None else self.models[task]
         path = self.root / f"{task}.niii-model"
@@ -99,7 +99,8 @@ class EncryptedYoloRuntimeTest(unittest.TestCase):
         import torch
         from ultralytics import YOLO
 
-        from toolkit.model_crypto import load_yolo_container, write_model_container
+        from toolkit.model_crypto import load_yolo_container
+        from toolkit.model_crypto.container_v1 import write_model_container
 
         image = np.zeros((64, 64, 3), dtype=np.uint8)
         for family in ("yolov8", "yolo26"):
@@ -199,13 +200,13 @@ class EncryptedYoloRuntimeTest(unittest.TestCase):
         self.assertNotIn("ch", restored.model.yaml)
 
     def test_non_rgb_ch_metadata_is_rejected(self):
-        from toolkit.model_crypto import load_yolo_container
+        from toolkit.model_crypto import ModelCryptoError, load_yolo_container
 
         source_yaml = deepcopy(self.models["detect"].model.yaml)
         source_yaml["ch"] = 1
         path = self._write(model_yaml=source_yaml)
 
-        with self.assertRaisesRegex(ValueError, "ch"):
+        with self.assertRaisesRegex(ModelCryptoError, "ch"):
             load_yolo_container(
                 path, "cpu", "detect", key_dir=self.keys, allow_cpu_for_tests=True,
             )
@@ -237,12 +238,13 @@ class EncryptedYoloRuntimeTest(unittest.TestCase):
     def test_unavailable_cuda_does_not_fall_back_to_cpu(self):
         import torch
 
-        from toolkit.model_crypto import load_yolo_container
+        from toolkit.model_crypto import ModelCryptoError, load_yolo_container
 
         if torch.cuda.is_available():
             self.skipTest("a CUDA device is present")
-        with self.assertRaisesRegex(RuntimeError, "CUDA"):
+        with self.assertRaisesRegex(ModelCryptoError, "CUDA") as caught:
             load_yolo_container(self._write(), "cuda:0", "detect", key_dir=self.keys)
+        self.assertEqual(ModelCryptoError.DEVICE_UNAVAILABLE, caught.exception.code)
 
     def test_ultralytics_numeric_device_is_treated_as_cuda(self):
         import torch
@@ -261,34 +263,37 @@ class EncryptedYoloRuntimeTest(unittest.TestCase):
             load_yolo_container(self._write(), "cpu", "detect", key_dir=self.keys)
 
     def test_wrong_key_and_key_id_fail_closed(self):
-        from toolkit.model_crypto import load_yolo_container
+        from toolkit.model_crypto import ModelCryptoError, load_yolo_container
 
         path = self._write()
         (self.keys / "kek.key").write_bytes(b"x" * 32)
-        with self.assertRaises(ValueError):
+        with self.assertRaises(ModelCryptoError) as caught:
             load_yolo_container(
                 path, "cpu", "detect", key_dir=self.keys, allow_cpu_for_tests=True,
             )
+        self.assertEqual(ModelCryptoError.AUTH_FAILED, caught.exception.code)
         (self.keys / "kek.key").write_bytes(b"k" * 32)
         (self.keys / "kek_id.txt").write_text("another-key\n", encoding="utf-8")
-        with self.assertRaisesRegex(ValueError, "key_id"):
+        with self.assertRaisesRegex(ModelCryptoError, "key_id") as caught:
             load_yolo_container(
                 path, "cpu", "detect", key_dir=self.keys, allow_cpu_for_tests=True,
             )
+        self.assertEqual(ModelCryptoError.KEY_ID_MISMATCH, caught.exception.code)
 
     def test_wrong_task_and_unsupported_yaml_are_rejected(self):
-        from toolkit.model_crypto import load_yolo_container
+        from toolkit.model_crypto import ModelCryptoError, load_yolo_container
 
         path = self._write()
-        with self.assertRaisesRegex(ValueError, "任务不匹配"):
+        with self.assertRaisesRegex(ModelCryptoError, "任务不匹配") as caught:
             load_yolo_container(
                 path, "cpu", "segment", key_dir=self.keys, allow_cpu_for_tests=True,
             )
+        self.assertEqual(ModelCryptoError.TASK_MISMATCH, caught.exception.code)
 
         unsafe_yaml = deepcopy(self.models["detect"].model.yaml)
         unsafe_yaml["activation"] = "__import__('os').system('echo unsafe')"
         unsafe_path = self.root / "unsafe.niii-model"
-        from toolkit.model_crypto import write_model_container
+        from toolkit.model_crypto.container_v1 import write_model_container
 
         write_model_container(
             unsafe_path,
@@ -299,18 +304,19 @@ class EncryptedYoloRuntimeTest(unittest.TestCase):
             kek=b"k" * 32,
             key_id="runtime-test",
         )
-        with self.assertRaisesRegex(ValueError, "架构"):
+        with self.assertRaisesRegex(ModelCryptoError, "架构") as caught:
             load_yolo_container(
                 unsafe_path, "cpu", "detect", key_dir=self.keys, allow_cpu_for_tests=True,
             )
+        self.assertEqual(ModelCryptoError.ARCH_UNSUPPORTED, caught.exception.code)
 
     def test_missing_state_key_and_invalid_class_ids_are_rejected(self):
-        from toolkit.model_crypto import load_yolo_container
+        from toolkit.model_crypto import ModelCryptoError, load_yolo_container
 
         state = dict(self.models["detect"].model.state_dict())
         state.pop(next(iter(state)))
         path = self._write(state_dict=state)
-        with self.assertRaisesRegex(ValueError, "state_dict"):
+        with self.assertRaisesRegex(ModelCryptoError, "state_dict"):
             load_yolo_container(
                 path, "cpu", "detect", key_dir=self.keys, allow_cpu_for_tests=True,
             )
@@ -318,7 +324,7 @@ class EncryptedYoloRuntimeTest(unittest.TestCase):
         names = dict(self.models["detect"].model.names)
         names.pop(0)
         bad_names_path = self.root / "bad-names.niii-model"
-        from toolkit.model_crypto import write_model_container
+        from toolkit.model_crypto.container_v1 import write_model_container
 
         write_model_container(
             bad_names_path,
@@ -329,18 +335,18 @@ class EncryptedYoloRuntimeTest(unittest.TestCase):
             kek=b"k" * 32,
             key_id="runtime-test",
         )
-        with self.assertRaisesRegex(ValueError, "类别 ID"):
+        with self.assertRaisesRegex(ModelCryptoError, "类别 ID"):
             load_yolo_container(
                 bad_names_path, "cpu", "detect", key_dir=self.keys, allow_cpu_for_tests=True,
             )
 
     def test_class_names_cannot_be_used_as_output_paths(self):
-        from toolkit.model_crypto import load_yolo_container
+        from toolkit.model_crypto import ModelCryptoError, load_yolo_container
 
         names = dict(self.models["detect"].model.names)
         names[0] = "../../checkpoint.pt"
         path = self._write(model_names=names)
-        with self.assertRaisesRegex(ValueError, "类别名称"):
+        with self.assertRaisesRegex(ModelCryptoError, "类别名称"):
             load_yolo_container(
                 path, "cpu", "detect", key_dir=self.keys, allow_cpu_for_tests=True,
             )

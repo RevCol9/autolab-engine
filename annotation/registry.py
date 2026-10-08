@@ -16,6 +16,7 @@ from annotation.engines.base import BaseEngine
 from annotation.engines.yolo import YoloDetectEngine, YoloSegmentEngine
 from annotation.settings import EngineKind, ModelConfig, Settings, YoloTask
 from shared.gpu_lock import GpuDeviceLock
+from toolkit.model_crypto import ModelCryptoError
 
 GPU_INFER_TIMEOUT = float(os.environ.get("NIII_GPU_INFER_TIMEOUT", "120"))
 GPU_LOAD_TIMEOUT = float(os.environ.get("NIII_GPU_LOAD_TIMEOUT", "180"))
@@ -100,7 +101,13 @@ class EngineRegistry:
                 detail=f"模型 {config.key} 尚未配置路径（models[].path 为空）",
             )
         engine = self._build_engine(config)
-        engine.load()
+        try:
+            engine.load()
+        except ModelCryptoError as exc:
+            raise HTTPException(
+                status_code=503,
+                detail={"code": exc.code, "message": str(exc)},
+            ) from exc
         self._engines[config.key] = engine
         self._active_key = config.key
         return engine

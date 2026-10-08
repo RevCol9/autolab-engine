@@ -72,33 +72,42 @@ class ModelCryptoKeyTest(unittest.TestCase):
         )
         self.assertEqual(0, completed.returncode, completed.stderr)
 
+    def test_runtime_cli_does_not_expose_trusted_pt_import(self):
+        completed = subprocess.run(
+            [sys.executable, "-m", "toolkit.model_crypto", "--help"],
+            cwd=Path(__file__).resolve().parents[1],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        self.assertIn("init-kek", completed.stdout)
+        self.assertNotIn("pack-v1", completed.stdout)
+
     def test_key_config_rejects_path_like_file_names(self):
         with self.assertRaisesRegex(ValueError, "单层文件名"):
             ModelCryptoConfig.from_mapping({"kek_file_name": "../kek.key"})
         with self.assertRaisesRegex(ValueError, "1..128"):
             ModelCryptoConfig.from_mapping({"kek_id": ""})
 
-    def test_public_surface_contains_only_container_runtime_operations(self):
+    def test_public_surface_is_small_and_runtime_only(self):
         self.assertEqual(
             {
-                "ENV_MODEL_CRYPTO_CONFIG",
-                "ENV_MODEL_KEK",
-                "ENV_MODEL_KEK_ID",
-                "ENV_MODEL_KEYS_DIR",
-                "FORMAT_VERSION",
-                "ModelContainer",
-                "ModelCryptoConfig",
+                "ModelCryptoError",
                 "create_yolo_architecture",
-                "default_model_crypto_config",
-                "init_kek",
-                "load_kek",
                 "load_yolo_container",
-                "parse_kek_material",
-                "read_model_container",
-                "write_model_container",
             },
             set(model_crypto.__all__),
         )
+
+    def test_trusted_pt_importer_is_outside_runtime_package(self):
+        repository = Path(__file__).resolve().parents[1]
+        runtime_dir = repository / "toolkit" / "model_crypto"
+        self.assertFalse((runtime_dir / "offline_convert.py").exists())
+        for source in runtime_dir.glob("*.py"):
+            self.assertNotIn("torch.load(", source.read_text(encoding="utf-8"), source)
+        build_script = repository / "scripts" / "convert_trusted_model.py"
+        self.assertIn("torch.load(", build_script.read_text(encoding="utf-8"))
 
     def test_removed_configuration_fields_are_not_silently_ignored(self):
         with self.assertRaisesRegex(ValueError, "不支持的字段"):

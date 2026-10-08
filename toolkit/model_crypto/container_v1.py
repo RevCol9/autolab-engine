@@ -16,6 +16,7 @@ from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 from toolkit.model_crypto.config import validate_key_id
+from toolkit.model_crypto.errors import ModelCryptoError
 
 MAGIC = b"NIIIMODL"
 FORMAT_VERSION = 1
@@ -424,7 +425,10 @@ def _read_model_container(
             )
         )
     except InvalidTag as exc:
-        raise ValueError("加密模型认证失败：密钥错误或文件已损坏") from exc
+        raise ModelCryptoError(
+            ModelCryptoError.AUTH_FAILED,
+            "加密模型认证失败：密钥错误或文件已损坏",
+        ) from exc
     finally:
         ciphertext.release()
         if dek is not None:
@@ -444,7 +448,12 @@ def _read_model_container(
 
 def read_model_container(path: str | Path, *, kek: bytes) -> ModelContainer:
     """Authenticate the entire ciphertext before parsing metadata or tensor bytes."""
-    return _read_model_container(path, kek=kek, require_suffix=True)
+    try:
+        return _read_model_container(path, kek=kek, require_suffix=True)
+    except ModelCryptoError:
+        raise
+    except (UnicodeError, ValueError) as exc:
+        raise ModelCryptoError(ModelCryptoError.FORMAT_INVALID, str(exc)) from exc
 
 
 __all__ = [

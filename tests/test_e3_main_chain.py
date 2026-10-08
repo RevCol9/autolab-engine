@@ -19,7 +19,7 @@ class EncryptedInferenceMainChainTest(unittest.TestCase):
         import torch
         from ultralytics import YOLO
 
-        from toolkit.model_crypto import write_model_container
+        from toolkit.model_crypto.container_v1 import write_model_container
 
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -181,7 +181,7 @@ class EncryptedTrainingArtifactContractTest(unittest.TestCase):
         import torch
         from ultralytics import YOLO
 
-        from toolkit.model_crypto import read_model_container
+        from toolkit.model_crypto.container_v1 import read_model_container
         from training.encrypted_checkpoints import save_training_model
 
         with tempfile.TemporaryDirectory() as tmp:

@@ -18,23 +18,17 @@ from typing import TYPE_CHECKING
 __all__ = [
     "CythonBuildConfig",
     "CythonBuilder",
-    "ModelCryptoConfig",
+    "ModelCryptoError",
     "create_yolo_architecture",
-    "init_kek",
     "load_yolo_container",
-    "read_model_container",
-    "write_model_container",
 ]
 
 _LAZY_EXPORTS = {
     "CythonBuildConfig": ("toolkit.cython_build", "CythonBuildConfig"),
     "CythonBuilder": ("toolkit.cython_build", "CythonBuilder"),
-    "ModelCryptoConfig": ("toolkit.model_crypto", "ModelCryptoConfig"),
+    "ModelCryptoError": ("toolkit.model_crypto", "ModelCryptoError"),
     "create_yolo_architecture": ("toolkit.model_crypto", "create_yolo_architecture"),
-    "init_kek": ("toolkit.model_crypto", "init_kek"),
     "load_yolo_container": ("toolkit.model_crypto", "load_yolo_container"),
-    "read_model_container": ("toolkit.model_crypto", "read_model_container"),
-    "write_model_container": ("toolkit.model_crypto", "write_model_container"),
 }
 
 
@@ -53,10 +47,7 @@ def __getattr__(name: str):
 if TYPE_CHECKING:
     from toolkit.cython_build import CythonBuildConfig, CythonBuilder
     from toolkit.model_crypto import (
-        ModelCryptoConfig,
+        ModelCryptoError,
         create_yolo_architecture,
-        init_kek,
         load_yolo_container,
-        read_model_container,
-        write_model_container,
     )

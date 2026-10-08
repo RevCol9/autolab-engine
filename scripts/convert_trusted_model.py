@@ -1,8 +1,14 @@
-"""Trusted build-host conversion from PyTorch checkpoints to `.niii-model`."""
+#!/usr/bin/env python3
+"""Convert one trusted YOLO ``.pt`` checkpoint on an isolated build host."""
 
 from __future__ import annotations
 
+import argparse
+import sys
 from pathlib import Path
+
+if __package__ in {None, ""}:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import torch
 
@@ -20,7 +26,7 @@ def convert_trusted_pt(
     task: str,
     key_dir: str | Path | None = None,
 ) -> Path:
-    """仅在具有可信来源的隔离导入环境中使用."""
+    """Convert a reviewed local checkpoint without creating plaintext output."""
     source = Path(source)
     destination = Path(destination)
     if source.suffix.lower() != ".pt" or not source.is_file():
@@ -30,8 +36,6 @@ def convert_trusted_pt(
     if source.resolve() == destination.resolve():
         raise ValueError("输入与输出不能是同一文件")
 
-    # 在运行时加载器之外进行的：只接受pickle
-    # 在隔离、可信的导入环境中
     checkpoint = torch.load(source, map_location="cpu", weights_only=False)
     if not isinstance(checkpoint, dict):
         raise ValueError("输入不是 YOLO checkpoint 字典")
@@ -63,12 +67,42 @@ def convert_trusted_pt(
         raise RuntimeError("加密模型写后验证失败")
     for name, original in model.state_dict().items():
         original_bytes = original.detach().cpu().contiguous().reshape(-1).view(torch.uint8)
-        restored_bytes = verified.state_dict[name].reshape(-1).view(torch.uint8)
-        if original.dtype != verified.state_dict[name].dtype or not torch.equal(
-            original_bytes, restored_bytes,
+        restored = verified.state_dict[name]
+        restored_bytes = restored.reshape(-1).view(torch.uint8)
+        if original.dtype != restored.dtype or not torch.equal(
+            original_bytes,
+            restored_bytes,
         ):
             raise RuntimeError(f"加密模型写后验证失败: {name}")
     return result
 
 
-__all__ = ["convert_trusted_pt"]
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="隔离构建机：将可信 YOLO .pt 转换为 .niii-model"
+    )
+    parser.add_argument("--src", required=True)
+    parser.add_argument("--dst", required=True)
+    parser.add_argument("--task", choices=("detect", "segment"), required=True)
+    parser.add_argument("--keys", required=True)
+    parser.add_argument("--trust-source-pt", action="store_true")
+    args = parser.parse_args(argv)
+    if not args.trust_source_pt:
+        parser.error("必须显式指定 --trust-source-pt")
+    return args
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(argv)
+    result = convert_trusted_pt(
+        args.src,
+        args.dst,
+        task=args.task,
+        key_dir=args.keys,
+    )
+    print(f"已生成并验证加密模型: {result}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
