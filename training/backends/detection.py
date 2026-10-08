@@ -10,7 +10,7 @@ from training.reporting import metric_lookup, trainer_lr, trainer_metric
 
 class DetectionBackend(TrainBackend):
     task = "detection"
-    default_model = "yolo11n.pt"
+    default_model = "yolo11n.yaml"
 
     def build_epoch_row(
         self,

@@ -140,6 +140,45 @@ class ModelContainerV1Test(unittest.TestCase):
         self.assertNotIn(b"helmet", data)
         self.assertNotIn(b"backbone", data)
 
+    def test_writer_atomically_replaces_only_an_existing_encrypted_container(self):
+        from toolkit.model_crypto.container_v1 import (
+            read_model_container,
+            write_model_container,
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "model.niii-model"
+            self._write(path)
+            replacement = {"weight": self.torch.tensor([9.0], dtype=self.torch.float32)}
+            write_model_container(
+                path,
+                state_dict=replacement,
+                model_yaml={"nc": 1},
+                model_names={0: "helmet"},
+                task="detect",
+                kek=self.kek,
+                key_id="test-key",
+                replace_existing=True,
+            )
+            restored = read_model_container(path, kek=self.kek)
+            self.assertEqual({"weight"}, set(restored.state_dict))
+            self.assertTrue(self.torch.equal(replacement["weight"], restored.state_dict["weight"]))
+
+            plaintext = Path(tmp) / "not-a-model.niii-model"
+            plaintext.write_text("do not overwrite", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "已有加密模型"):
+                write_model_container(
+                    plaintext,
+                    state_dict=replacement,
+                    model_yaml={"nc": 1},
+                    model_names={0: "helmet"},
+                    task="detect",
+                    kek=self.kek,
+                    key_id="test-key",
+                    replace_existing=True,
+                )
+            self.assertEqual("do not overwrite", plaintext.read_text(encoding="utf-8"))
+
     def test_writer_rejects_tensor_rank_that_reader_cannot_load(self):
         from toolkit.model_crypto.container_v1 import write_model_container
 

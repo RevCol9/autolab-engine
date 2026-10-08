@@ -1,48 +1,29 @@
 # 模型权重说明
 
-本仓库**不包含**业务基线 `best.pt`。权重按用途分三层管理：
+生产训练与 YOLO 推理只允许 `.niii-model`。仓库、部署镜像、模型卷和训练目录不得包含
+业务 `.pt`/`.pth`，也不得采用“先写 `best.pt`，再加密删除”的流程。
 
-## 1. Git 仓库内（`resources/`）
-
-| 文件 | 用途 |
-|------|------|
-| `resources/yolov8n.pt` | Ultralytics 官方预训练权重（约 6MB），用于从零训练或离线环境兜底 |
-
-闭环误报微调**不直接使用**此文件，而是从 storage 基线 `best.pt` 继续训练。
-
-## 2. 训练 storage（不进 Git）
+## 训练 storage
 
 路径根：`{STORAGE_ROOT}/algorithms/{算法类型}/`
 
-| 路径 | 用途 | 如何获得 |
-|------|------|----------|
-| `models/baseline/weights/best.pt` | **误报微调起始权重** | 训练平台「同步基线 PT」 |
-| `train{N}/weights/best.pt` | 第 N 次训练产出 | 训练成功后自动生成 |
-| `models/versions/v{N}/best.pt` | 归档版本 | Java 后端归档 |
-
-104 默认 storage 根：`/niii_machine_version/AI_trainning_platform/storage`
-
-## 3. 分析平台算法仓库（不进 Git）
-
 | 路径 | 用途 |
 |------|------|
-| `{algorithm-repository}/{algorithm-code}/weights/best.pt` | **线上推理 PT** |
-| `.../weights/baseline/best.pt` | 基线快照（同步时写入） |
-| `.../weights/backups/` | 回灌前自动备份 |
-| `.../weights/versions/v{N}/best.pt` | 回灌用归档 |
+| `models/baseline/weights/best.niii-model` | 误报微调的加密起始权重 |
+| `train{N}/weights/best.niii-model` | 第 N 次训练的加密最佳权重 |
+| `train{N}/weights/last.niii-model` | 第 N 次训练的加密末轮权重 |
+| `models/versions/v{N}/best.niii-model` | Java 后端归档/回灌版本 |
 
-104 默认算法仓库：`/home/model/zhuqiang`（如 `yolo_detect/weights/best.pt`）
+`is_continue` 加载上次训练的 `weights/best.niii-model` 并创建新 optimizer，不等同于
+精确 checkpoint resume；首版明确拒绝 `resume=True`。
 
-## 新环境最小要求
+## 模型来源
 
-1. 克隆本 Git 仓库并安装 Python 环境（见 `deploy/setup-new-env.md`）
-2. 创建 storage 目录
-3. 确保算法仓库存在线上 `best.pt`，或在 storage 中手动放置基线 PT
-4. 在训练平台点击「同步基线 PT」，将线上模型复制到 storage 基线路径
+- 从零训练使用受控的 YOLOv8、YOLO11、YOLO26 检测/分割架构 YAML，不自动下载权重。
+- 预训练和继续微调必须由后端提供允许根目录内的 `.niii-model`。
+- 初始 `.pt` 只允许在部署环境外的隔离导入机进行可信转换；转换后只发布密文容器。
+- KEK 与模型分离，通过受限密钥目录和 key ID 注入，不提交 Git、不放入模型目录。
 
-## 不要提交进 Git 的文件
-
-- 业务 `best.pt`（会随回灌/训练频繁变化）
-- 训练 run 输出 `train*/weights/`
-- SAM 预训练 `.pth`（体积大，按需下载）
-- `yolov8m/s/seg.pt` 等 Legacy 权重
+上线前还必须完成 GPU/业务权重验证、全过程文件创建事件监控、异常故障注入和发布物
+扫描。SAM3、LocateAnything 等尚未接入 `.niii-model` 的入口不得包含在“服务器无明文
+模型”的生产部署中。

@@ -12,8 +12,8 @@ models:
   - key: yolo-detect              # 模型唯一标识，请求参数 model_key 使用该值
     name: YOLO Detect             # 展示名称
     task: detect                  # detect：目标检测；segment：实例分割
-    # 权重文件绝对路径。Ultralytics 支持 .pt；也可指向导出后的 .onnx
-    path: "/path/to/your-detect.pt"
+    # 加密权重绝对路径；部署运行时不接受 .pt/.onnx 或旧 *_enc.pt
+    path: "/path/to/your-detect.niii-model"
     device: "cuda:0"              # 推理设备，如 cuda:0 / cpu
     conf: 0.25                    # 置信度阈值，低于该值的框将被过滤
     iou: 0.45                     # NMS IoU 阈值，抑制重叠框
@@ -24,7 +24,7 @@ models:
   # - key: yolo-seg
   #   name: YOLO Seg
   #   task: segment
-  #   path: "/path/to/your-seg.pt"
+  #   path: "/path/to/your-seg.niii-model"
   #   device: "cuda:0"
   #   conf: 0.25
   #   iou: 0.45

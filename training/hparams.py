@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from copy import deepcopy
 from pathlib import Path
 from typing import Any, Dict, Mapping, Optional
@@ -11,7 +12,7 @@ import yaml
 from training.backends import get_backend
 from training.dataset import TrainingDataset
 from training.paths import (
-    baseline_pt_from_last_train,
+    baseline_model_from_last_train,
     resolve_pretrained_model_path,
     train_save_dir,
 )
@@ -22,6 +23,11 @@ API_FIELD_ALIASES: Dict[str, str] = {
     "batch_size": "batch",
     "image_size": "imgsz",
 }
+
+_CONTROLLED_MODEL = re.compile(
+    r"^(?:yolov8|yolo11|yolo26)[nsmlx](?:-seg)?\.yaml$",
+    flags=re.IGNORECASE,
+)
 
 JOB_META_KEYS = frozenset(
     {
@@ -49,12 +55,37 @@ def _truthy(value: Any) -> bool:
     return text in {"1", "true", "yes", "y", "on"}
 
 
+def _validate_controlled_architecture(model: Any, *, task: str) -> str:
+    text = str(model).strip()
+    if not text or "/" in text or "\\" in text:
+        raise ValueError(
+            "model 必须是受控 YOLOv8/YOLO11/YOLO26 架构 YAML，"
+            "或通过 pretrained_model_path 提供 .niii-model"
+        )
+    name = text.lower()
+    if not _CONTROLLED_MODEL.fullmatch(name):
+        raise ValueError(
+            "model 必须是受控 YOLOv8/YOLO11/YOLO26 架构 YAML，"
+            "或通过 pretrained_model_path 提供 .niii-model"
+        )
+    is_segment = name.endswith("-seg.yaml")
+    if task == "segmentation" and not is_segment:
+        raise ValueError("分割训练必须使用 *-seg.yaml 受控架构")
+    if task == "detection" and is_segment:
+        raise ValueError("检测训练不能使用分割架构")
+    if task not in {"detection", "segmentation"}:
+        raise ValueError(f"不支持的训练任务: {task!r}")
+    return name
+
+
 def resolve_model_path(
     param: Mapping[str, Any],
     *,
     task: str,
     defaults: Optional[Mapping[str, Any]] = None,
 ) -> str:
+    if _truthy(param.get("resume")):
+        raise ValueError("加密训练首版不支持 resume=True；请从加密 best 重新微调")
     pretrained_model_path = param.get("pretrained_model_path")
     if _truthy(param.get("is_continue")):
         if pretrained_model_path is not None:
@@ -64,7 +95,7 @@ def resolve_model_path(
         last_train = param.get("last_train")
         if not last_train:
             raise ValueError("is_continue=true 时必须提供 last_train")
-        return baseline_pt_from_last_train(str(last_train))
+        return baseline_model_from_last_train(str(last_train))
     if pretrained_model_path is not None:
         if param.get("model"):
             raise ValueError("model 与 pretrained_model_path 不能同时使用")
@@ -73,7 +104,7 @@ def resolve_model_path(
     model = param.get("model") or (defaults or {}).get("model") or backend.default_model
     text = str(model).strip()
     if "/" not in text and "\\" not in text:
-        return text.lower()
+        return _validate_controlled_architecture(text, task=task)
     return resolve_pretrained_model_path(text)
 
 
@@ -111,10 +142,7 @@ def build_job_train_config(
     config: Dict[str, Any] = load_training_defaults(task)
     config.update(normalize_api_param(param))
     model_path = resolve_model_path(param, task=task, defaults=config)
-    explicit_model = str(param.get("model") or "")
-    if param.get("pretrained_model_path") or any(
-        separator in explicit_model for separator in ("/", "\\")
-    ):
+    if Path(model_path).suffix.lower() == ".niii-model":
         ensure_input_survives_reset(model_path, save_path)
 
     data_yaml = TrainingDataset.from_job(param).prepare(task=task)
@@ -164,4 +192,13 @@ def load_job_config(path: str | Path) -> Dict[str, Any]:
     missing = [key for key in required if not data.get(key)]
     if missing:
         raise ValueError(f"train_config.yaml 缺少字段: {missing}")
+    task = str(data["train_task"]).strip().lower()
+    if _truthy(data.get("resume")):
+        raise ValueError("加密训练首版不支持 resume=True；请从加密 best 重新微调")
+    model = str(data["model"]).strip()
+    if Path(model).suffix.lower() == ".niii-model":
+        data["model"] = resolve_pretrained_model_path(model)
+    else:
+        data["model"] = _validate_controlled_architecture(model, task=task)
+    data["train_task"] = task
     return data

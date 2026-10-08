@@ -10,7 +10,7 @@ from training.reporting import metric_lookup, trainer_metric
 
 class SegmentationBackend(DetectionBackend):
     task = "segmentation"
-    default_model = "yolo11n-seg.pt"
+    default_model = "yolo11n-seg.yaml"
 
     def build_epoch_row(
         self,

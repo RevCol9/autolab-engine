@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import argparse
+import os
 import time
 from pathlib import Path
 
-from ultralytics import YOLO
-
+from toolkit.model_crypto import create_yolo_architecture, load_yolo_container
 from training.backends import get_backend
+from training.encrypted_trainer import create_encrypted_trainer
 from training.hparams import load_job_config
 from training.reporting import (
     build_report,
@@ -47,6 +48,8 @@ def main():
     actual_resource = {}
     sampler_started = False
     device = str(config.get("device", "0"))
+    container_task = {"detection": "detect", "segmentation": "segment"}[train_task]
+    allow_cpu_for_tests = os.environ.get("NIII_ALLOW_CPU_MODEL_TESTS") == "1"
 
     def on_fit_epoch_end(trainer):
         now = time.time()
@@ -71,40 +74,75 @@ def main():
         write_csv(csv_path, row, state)
 
     try:
-        model = YOLO(model_path)
+        if Path(model_path).suffix.lower() == ".niii-model":
+            model = load_yolo_container(
+                model_path,
+                device,
+                container_task,
+                allow_cpu_for_tests=allow_cpu_for_tests,
+            )
+        elif Path(model_path).suffix.lower() == ".yaml":
+            model = create_yolo_architecture(
+                model_path,
+                device,
+                container_task,
+                allow_cpu_for_tests=allow_cpu_for_tests,
+            )
+        else:
+            raise ValueError(
+                "训练 model 只接受受控架构 .yaml 或预训练 .niii-model"
+            )
         batch = int(config.get("batch", 4))
         imgsz = int(config.get("imgsz", 640))
         device = str(config.get("device", "0"))
         baseline_eval = evaluate_model(
-            model_path=model_path,
+            model=model,
             data=data_path,
             batch=batch,
             imgsz=imgsz,
             device=device,
             project_dir=save_dir,
             run_name="baseline_eval",
+            task=container_task,
+            allow_cpu_for_tests=allow_cpu_for_tests,
         )
+        if baseline_eval.get("error"):
+            raise RuntimeError(f"加密训练基线评估失败: {baseline_eval['error']}")
         train_start = time.time()
         state["epoch_start"] = train_start
         sampler = ResourceSampler(device=device).start()
         sampler_started = True
-        model.add_callback("on_fit_epoch_end", on_fit_epoch_end)
-        model.train(data=data_path, **config)
-        trained_pt = save_dir / "weights" / "best.pt"
+        trainer = create_encrypted_trainer(
+            model.model,
+            task=train_task,
+            overrides={**config, "model": model_path, "data": data_path},
+            allow_cpu_for_tests=allow_cpu_for_tests,
+        )
+        trainer.add_callback("on_fit_epoch_end", on_fit_epoch_end)
+        trainer.train()
+        trained_model = save_dir / "weights" / "best.niii-model"
         actual_resource = sampler.stop()
         sampler_started = False
-        if trained_pt.is_file():
+        if trained_model.is_file():
             trained_eval = evaluate_model(
-                model_path=str(trained_pt),
+                model=str(trained_model),
                 data=data_path,
                 batch=batch,
                 imgsz=imgsz,
                 device=device,
                 project_dir=save_dir,
                 run_name="trained_eval",
+                task=container_task,
+                allow_cpu_for_tests=allow_cpu_for_tests,
             )
+            if trained_eval.get("error"):
+                raise RuntimeError(f"加密训练结果评估失败: {trained_eval['error']}")
         else:
-            trained_eval = {"error": "trained weights not found", "modelPath": str(trained_pt)}
+            trained_eval = {
+                "error": "trained encrypted weights not found",
+                "modelPath": str(trained_model),
+            }
+            raise RuntimeError(f"训练结束但未生成加密权重: {trained_model}")
     finally:
         if sampler_started:
             actual_resource = sampler.stop()

@@ -130,13 +130,34 @@ def write_model_container(
     task: str,
     kek: bytes,
     key_id: str,
+    replace_existing: bool = False,
 ) -> Path:
     """Write only ciphertext to disk; source tensors stay in process memory."""
     destination = Path(destination)
     if destination.suffix != ".niii-model":
         raise ValueError("加密模型目标文件必须以 .niii-model 结尾")
+    if destination.exists() and not replace_existing:
+        raise FileExistsError(f"加密模型已存在，请使用新的工作 ID: {destination}")
     if destination.exists():
-        raise FileExistsError(f"加密模型已存在，请使用新的工件 ID: {destination}")
+        if not destination.is_file():
+            raise ValueError(f"替换目标不是已有加密模型文件: {destination}")
+        with destination.open("rb") as stream:
+            existing_header = stream.read(_HEADER.size)
+            existing_size = os.fstat(stream.fileno()).st_size
+        try:
+            magic, version, flags, key_id_length, cipher_length, _, *_ = _HEADER.unpack(
+                existing_header
+            )
+        except struct.error as exc:
+            raise ValueError(f"替换目标不是已有加密模型: {destination}") from exc
+        if (
+            magic != MAGIC
+            or version != FORMAT_VERSION
+            or flags != 0
+            or not 0 < key_id_length <= MAX_KEY_ID_BYTES
+            or existing_size != _HEADER.size + key_id_length + cipher_length
+        ):
+            raise ValueError(f"替换目标不是已有加密模型: {destination}")
     if len(kek) != 32:
         raise ValueError("KEK 必须为 32 字节")
     key_id_bytes = key_id.encode("utf-8")

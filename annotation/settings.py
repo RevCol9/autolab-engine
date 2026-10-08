@@ -118,6 +118,10 @@ class ModelConfig:
                     f"YOLO 模型 {self.key!r} 的 task={self.task!r} 不受支持；"
                     f"可选 {[item.value for item in YoloTask]}"
                 ) from exc
+            if self.path and Path(self.path).suffix.lower() != ".niii-model":
+                raise ValueError(
+                    f"YOLO 模型 {self.key!r} 只接受 .niii-model 加密模型: {self.path!r}"
+                )
         elif not self.task:
             raise ValueError(f"模型 {self.key!r} 的 task 不能为空")
         parse_device_index(self.device)

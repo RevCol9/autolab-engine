@@ -22,9 +22,24 @@ METRIC_ALIASES = {
 }
 
 
-def evaluate_model(model_path, data, batch, imgsz, device, project_dir, run_name):
-    from ultralytics import YOLO
+def evaluate_model(
+    model,
+    data,
+    batch,
+    imgsz,
+    device,
+    project_dir,
+    run_name,
+    *,
+    task,
+    key_dir=None,
+    allow_cpu_for_tests=False,
+):
+    from toolkit.model_crypto import load_yolo_container
 
+    model_path = str(model) if isinstance(model, (str, Path)) else str(
+        getattr(model, "model_name", "in-memory")
+    )
     result = {
         "modelPath": str(model_path),
         "runDir": str(Path(project_dir) / run_name),
@@ -36,7 +51,16 @@ def evaluate_model(model_path, data, batch, imgsz, device, project_dir, run_name
         "error": None,
     }
     try:
-        metrics = YOLO(model_path).val(
+        runtime_model = model
+        if isinstance(model, (str, Path)):
+            runtime_model = load_yolo_container(
+                model,
+                device,
+                task,
+                key_dir=key_dir,
+                allow_cpu_for_tests=allow_cpu_for_tests,
+            )
+        metrics = runtime_model.val(
             data=data,
             batch=batch,
             imgsz=imgsz,
@@ -170,7 +194,7 @@ def collect_artifacts(save_dir):
             if path.is_file():
                 artifacts.append(str(path.relative_to(save_dir)))
     weights_dir = save_dir / "weights"
-    for name in ("best.pt", "last.pt"):
+    for name in ("best.niii-model", "last.niii-model"):
         path = weights_dir / name
         if path.is_file():
             artifacts.append(str(path.relative_to(save_dir)))

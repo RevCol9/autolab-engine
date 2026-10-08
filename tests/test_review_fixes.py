@@ -265,20 +265,20 @@ class TrainStopStateTest(unittest.TestCase):
 
 
 class PretrainedModelPathTest(unittest.TestCase):
-    def test_resolves_conventional_best_weight_from_directory(self):
+    def test_resolves_conventional_encrypted_best_from_directory(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp).resolve()
-            model = root / "published" / "weights" / "best.pt"
+            model = root / "published" / "weights" / "best.niii-model"
             model.parent.mkdir(parents=True)
             model.write_bytes(b"weights")
             with patch("training.paths.TRAINING_MODEL_ROOTS", (root,)):
                 resolved = resolve_pretrained_model_path("published")
             self.assertEqual(str(model), resolved)
 
-    def test_resolves_unique_pt_from_directory(self):
+    def test_resolves_unique_encrypted_model_from_directory(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp).resolve()
-            model = root / "published" / "custom.pt"
+            model = root / "published" / "custom.niii-model"
             model.parent.mkdir()
             model.write_bytes(b"weights")
             with patch("training.paths.TRAINING_MODEL_ROOTS", (root,)):
@@ -288,7 +288,7 @@ class PretrainedModelPathTest(unittest.TestCase):
     def test_rejects_path_outside_configured_roots(self):
         with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as other:
             allowed = Path(tmp).resolve()
-            model = Path(other).resolve() / "model.pt"
+            model = Path(other).resolve() / "model.niii-model"
             model.write_bytes(b"weights")
             with (
                 patch("training.paths.TRAINING_MODEL_ROOTS", (allowed,)),

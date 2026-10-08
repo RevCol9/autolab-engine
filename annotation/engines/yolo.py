@@ -1,8 +1,9 @@
-"""YOLO 检测引擎（Ultralytics .pt；.onnx 同路径加载）。"""
+"""从认证的 .niii-model 加载 YOLO 检测与分割模型。"""
 
 from __future__ import annotations
 
 import logging
+import os
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -27,24 +28,24 @@ class YoloDetectEngine(BaseEngine):
         if not self.config.path or not path.is_file():
             raise FileNotFoundError(
                 f"模型权重不存在: {self.config.path!r}。"
-                "请在 config/annotation.yaml 的 models[].path 填写有效 .pt/.onnx 路径。"
+                "请在 config/annotation.yaml 的 models[].path 填写有效 .niii-model 路径。"
             )
         try:
-            from ultralytics import YOLO
+            from toolkit.model_crypto import load_yolo_container
         except ImportError as exc:
             raise ImportError(
-                "未安装 ultralytics。请使用 YOLO 环境或: pip install ultralytics"
+                "加密 YOLO 运行时依赖未安装，请检查 ultralytics/torch/cryptography"
             ) from exc
 
         t0 = time.perf_counter()
-        self.model = YOLO(str(path))
-        # 触发一次设备绑定（不跑真实推理）
         device = self.config.device
-        if hasattr(self.model, "to") and device:
-            try:
-                self.model.to(device)
-            except Exception as exc:
-                logger.warning("model.to(%s) failed for %s: %s", device, path, exc)
+        allow_cpu_for_tests = os.environ.get("NIII_ALLOW_CPU_MODEL_TESTS") == "1"
+        self.model = load_yolo_container(
+            path,
+            device,
+            self.config.task,
+            allow_cpu_for_tests=allow_cpu_for_tests,
+        )
         logger.debug(
             "load  %s | task=%s | device=%s | %.2fs",
             path,

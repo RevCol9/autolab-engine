@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from copy import deepcopy
 from pathlib import Path
 from typing import Any
@@ -24,6 +25,10 @@ _TASKS = {
     "detect": ("", DetectionModel),
     "segment": ("-seg", SegmentationModel),
 }
+_CONTROLLED_ARCHITECTURE = re.compile(
+    r"^(yolov8|yolo11|yolo26)([nsmlx])(-seg)?\.yaml$",
+    flags=re.IGNORECASE,
+)
 
 
 class EncryptedYOLO(YOLO):
@@ -46,6 +51,80 @@ class EncryptedYOLO(YOLO):
 
     def load(self, *args, **kwargs):
         raise RuntimeError("EncryptedYOLO 不允许加载明文 checkpoint")
+
+
+def _target_device(
+    device: str | torch.device,
+    *,
+    allow_cpu_for_tests: bool,
+) -> torch.device:
+    normalized = str(device).strip().lower()
+    if normalized == "cuda":
+        normalized = "cuda:0"
+    elif normalized.isdigit():
+        normalized = f"cuda:{normalized}"
+    target = torch.device(normalized)
+    if target.type not in {"cpu", "cuda"}:
+        raise ValueError(f"不支持的模型设备: {target}")
+    if target.type == "cpu" and not allow_cpu_for_tests:
+        raise RuntimeError("首版加密模型运行时必须使用 CUDA；CPU 仅限显式测试模式")
+    if target.type == "cuda" and not torch.cuda.is_available():
+        raise RuntimeError("指定 CUDA 设备不可用，不回退到 CPU")
+    return target
+
+
+def _build_yolo(
+    trusted_path: Path,
+    trusted_yaml: dict[str, Any],
+    model_type: type[DetectionModel],
+    task: str,
+) -> EncryptedYOLO:
+    yolo = EncryptedYOLO(str(trusted_path), task=task, verbose=False)
+    if trusted_yaml["scale"] == "n" and trusted_yaml["nc"] == yolo.model.yaml["nc"]:
+        network = yolo.model
+        network.yaml = deepcopy(trusted_yaml)
+    else:
+        previous_args = yolo.model.args
+        yolo.model = None
+        network = model_type(cfg=deepcopy(trusted_yaml), verbose=False)
+        network.args = previous_args
+    network.task = task
+    yolo.model = network
+    return yolo
+
+
+def create_yolo_architecture(
+    model_name: str,
+    device: str | torch.device,
+    expected_task: str,
+    *,
+    allow_cpu_for_tests: bool = False,
+) -> EncryptedYOLO:
+    """Build a new model only from an absolute, package-owned YOLO template."""
+    target_device = _target_device(device, allow_cpu_for_tests=allow_cpu_for_tests)
+    match = _CONTROLLED_ARCHITECTURE.fullmatch(str(model_name).strip())
+    if match is None:
+        raise ValueError("只允许受控 YOLOv8/YOLO11/YOLO26 架构 YAML")
+    family, scale, segment_suffix = match.groups()
+    family = family.lower()
+    suffix, model_type = _TASKS.get(expected_task, (None, None))
+    if suffix is None or bool(segment_suffix) != (expected_task == "segment"):
+        raise ValueError(f"模型架构与训练任务不匹配: {model_name!r} / {expected_task!r}")
+    folder = dict(_FAMILIES)[family]
+    trusted_path = ROOT / "cfg" / "models" / folder / f"{family}{suffix}.yaml"
+    if not trusted_path.is_file():
+        raise FileNotFoundError(f"Ultralytics 受控架构模板不存在: {trusted_path}")
+    trusted_yaml = YAML.load(trusted_path)
+    trusted_yaml.update(
+        scale=scale.lower(),
+        yaml_file=f"{family}{scale.lower()}{suffix}.yaml",
+        channels=3,
+    )
+    yolo = _build_yolo(trusted_path, trusted_yaml, model_type, expected_task)
+    yolo.model_name = str(model_name).lower()
+    yolo.overrides["model"] = yolo.model_name
+    yolo.to(target_device)
+    return yolo
 
 
 def _trusted_configuration(
@@ -116,13 +195,7 @@ def load_yolo_container(
     if path.suffix != ".niii-model":
         raise ValueError("运行时只接受 .niii-model 模型文件")
 
-    target_device = torch.device(device)
-    if target_device.type not in {"cpu", "cuda"}:
-        raise ValueError(f"不支持的模型设备: {target_device}")
-    if target_device.type == "cpu" and not allow_cpu_for_tests:
-        raise RuntimeError("首版加密模型运行时必须使用 CUDA；CPU 仅限显式测试模式")
-    if target_device.type == "cuda" and not torch.cuda.is_available():
-        raise RuntimeError("指定 CUDA 设备不可用，不回退到 CPU")
+    target_device = _target_device(device, allow_cpu_for_tests=allow_cpu_for_tests)
 
     kek, key_id = load_kek(key_dir=key_dir, model_path=path)
     container = read_model_container(path, kek=kek)
@@ -131,16 +204,8 @@ def load_yolo_container(
     trusted_path, trusted_yaml, model_type = _trusted_configuration(container, expected_task)
 
     # An absolute package YAML path avoids cwd shadowing or implicit .pt downloads.
-    yolo = EncryptedYOLO(str(trusted_path), task=expected_task, verbose=False)
-    if trusted_yaml["scale"] == "n" and trusted_yaml["nc"] == yolo.model.yaml["nc"]:
-        network = yolo.model
-        network.yaml = deepcopy(trusted_yaml)
-    else:
-        previous_args = yolo.model.args
-        yolo.model = None
-        network = model_type(cfg=deepcopy(trusted_yaml), verbose=False)
-        network.args = previous_args
-    network.task = expected_task
+    yolo = _build_yolo(trusted_path, trusted_yaml, model_type, expected_task)
+    network = yolo.model
     network.names = dict(container.model_names)
 
     expected_state = network.state_dict()
@@ -156,11 +221,10 @@ def load_yolo_container(
         elif tensor.dtype != reference.dtype:
             raise ValueError(f"加密模型 tensor dtype 不匹配: {name}")
     network.load_state_dict(container.state_dict, strict=True, assign=True)
-    yolo.model = network
     yolo.model_name = str(path)
     yolo.overrides["model"] = str(path)
     yolo.to(target_device)
     return yolo
 
 
-__all__ = ["EncryptedYOLO", "load_yolo_container"]
+__all__ = ["EncryptedYOLO", "create_yolo_architecture", "load_yolo_container"]

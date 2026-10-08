@@ -24,10 +24,11 @@ from toolkit.model_crypto.core import (
 )
 from toolkit.model_crypto.envelope import load_kek, unwrap_dek, wrap_dek
 from toolkit.model_crypto.loader import load_yolo, resolve_weight_path
-from toolkit.model_crypto.runtime import load_yolo_container
+from toolkit.model_crypto.runtime import create_yolo_architecture, load_yolo_container
 
 __all__ = [
     "CRYPTO_VERSION",
+    "create_yolo_architecture",
     "ENV_MODEL_CRYPTO_CONFIG",
     "ENV_MODEL_KEK",
     "ENV_MODEL_KEK_ID",

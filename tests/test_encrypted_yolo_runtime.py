@@ -218,6 +218,16 @@ class EncryptedYoloRuntimeTest(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "CUDA"):
             load_yolo_container(self._write(), "cuda:0", "detect", key_dir=self.keys)
 
+    def test_ultralytics_numeric_device_is_treated_as_cuda(self):
+        import torch
+
+        from toolkit.model_crypto import load_yolo_container
+
+        if torch.cuda.is_available():
+            self.skipTest("CPU-only assertion")
+        with self.assertRaisesRegex(RuntimeError, "CUDA"):
+            load_yolo_container(self._write(), "0", "detect", key_dir=self.keys)
+
     def test_cpu_loading_requires_explicit_test_only_opt_in(self):
         from toolkit.model_crypto import load_yolo_container
 

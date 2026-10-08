@@ -1,7 +1,4 @@
-"""训练路径配置。
-
-可通过环境变量覆盖；与 Java boot-vision 的 storage / 基线 PT 约定保持一致。
-"""
+"""训练路径配置与加密模型地址约束。"""
 
 from __future__ import annotations
 
@@ -74,10 +71,8 @@ def _validate_pretrained_file(path: Path) -> Path:
     resolved = _ensure_under_model_roots(path)
     if not resolved.is_file():
         raise FileNotFoundError(f"预训练模型不存在: {resolved}")
-    if resolved.suffix.lower() != ".pt":
-        raise ValueError(f"预训练模型必须是 .pt 文件: {resolved}")
-    if resolved.name.lower().endswith("_enc.pt"):
-        raise ValueError(f"训练暂不支持直接加载加密权重: {resolved}")
+    if resolved.suffix.lower() != ".niii-model":
+        raise ValueError(f"预训练模型必须是 .niii-model 加密文件: {resolved}")
     if resolved.stat().st_size <= 0:
         raise ValueError(f"预训练模型文件为空: {resolved}")
     try:
@@ -106,24 +101,28 @@ def resolve_pretrained_model_path(value: object) -> str:
     if not candidate.is_dir():
         raise ValueError(f"预训练模型地址不是文件或目录: {candidate}")
 
-    for relative in (Path("weights") / "best.pt", Path("best.pt")):
+    for relative in (
+        Path("weights") / "best.niii-model",
+        Path("best.niii-model"),
+    ):
         model_file = candidate / relative
         if model_file.is_file():
             return str(_validate_pretrained_file(model_file))
 
-    model_files = sorted(path for path in candidate.glob("*.pt") if path.is_file())
+    model_files = sorted(path for path in candidate.glob("*.niii-model") if path.is_file())
     if not model_files:
         raise FileNotFoundError(
-            f"模型目录中未找到 weights/best.pt、best.pt 或直属 .pt 文件: {candidate}"
+            "模型目录中未找到 weights/best.niii-model、best.niii-model "
+            f"或直属 .niii-model 文件: {candidate}"
         )
     if len(model_files) > 1:
         names = ", ".join(path.name for path in model_files)
-        raise ValueError(f"模型目录包含多个 .pt 文件，无法确定加载目标: {names}")
+        raise ValueError(f"模型目录包含多个 .niii-model 文件，无法确定加载目标: {names}")
     return str(_validate_pretrained_file(model_files[0]))
 
 
-def baseline_pt_from_last_train(last_train: str) -> str:
-    """Resolve baseline weights path from Java last_train field."""
+def baseline_model_from_last_train(last_train: str) -> str:
+    """Resolve encrypted baseline weights from the Java last_train field."""
     rel = last_train.replace("\\", "/").strip().lstrip("/")
     if not rel:
         raise ValueError("last_train 为空")
@@ -132,8 +131,8 @@ def baseline_pt_from_last_train(last_train: str) -> str:
     if rel.startswith("storage/"):
         rel = rel[len("storage/") :]
     storage = (PLATFORM_ROOT / "storage").resolve()
-    candidate = storage / rel / "weights" / "best.pt"
-    return str(_ensure_under(candidate, storage))
+    candidate = storage / rel / "weights" / "best.niii-model"
+    return str(_validate_pretrained_file(_ensure_under(candidate, storage)))
 
 
 def classes_txt_path(project_id: str, task_id: str) -> Path:

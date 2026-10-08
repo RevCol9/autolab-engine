@@ -49,8 +49,8 @@ class TrainJobBody(BaseModel):
     pretrained_model_path: Optional[str] = Field(
         None,
         description=(
-            "预训练 .pt 文件或模型目录；目录依次查找 weights/best.pt、"
-            "best.pt、唯一直属 .pt 文件"
+            "预训练 .niii-model 文件或模型目录；目录依次查找 "
+            "weights/best.niii-model、best.niii-model、唯一直属加密模型"
         ),
         validation_alias=AliasChoices(
             "pretrained_model_path",

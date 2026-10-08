@@ -32,7 +32,7 @@ def build_closed_loop_cmd(
 
 
 def collect_train_result(save_dir: Path) -> Dict[str, Any]:
-    weight = save_dir / "weights" / "best.pt"
+    weight = save_dir / "weights" / "best.niii-model"
     if not weight.is_file():
         raise RuntimeError(f"trained weights not found: {weight}")
     config_path = save_dir / "train_config.yaml"
