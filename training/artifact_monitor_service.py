@@ -131,6 +131,18 @@ class ArtifactMonitorService:
     def _process_exit_code(session: _MonitorSession) -> int | None:
         return session.process.poll()
 
+    @staticmethod
+    def _temporary_environment(session: _MonitorSession) -> dict[str, str]:
+        tmp_dir = str(session.temp_root / "tmp")
+        return {
+            "TMPDIR": tmp_dir,
+            "TMP": tmp_dir,
+            "TEMP": tmp_dir,
+            "TORCH_HOME": str(session.temp_root / "torch-home"),
+            "XDG_CACHE_HOME": str(session.temp_root / "xdg-cache"),
+            "MPLCONFIGDIR": str(session.temp_root / "matplotlib"),
+        }
+
     def _snapshot_locked(self, session: _MonitorSession) -> dict[str, Any]:
         exit_code = self._process_exit_code(session)
         summary = _read_json(session.summary)
@@ -140,6 +152,7 @@ class ArtifactMonitorService:
             status = str(summary.get("status") or "error")
         else:
             status = "error"
+        temporary_environment = self._temporary_environment(session)
         return {
             "status": status,
             "sessionId": session.session_id,
@@ -150,7 +163,9 @@ class ArtifactMonitorService:
             "monitorExitCode": exit_code,
             "startedAt": session.started_at,
             "roots": [str(session.run_root), str(session.temp_root)],
-            "tempDir": str(session.temp_root),
+            "tempRoot": str(session.temp_root),
+            "tempDir": temporary_environment["TMPDIR"],
+            "environment": temporary_environment,
             "evidenceDir": str(session.evidence_root),
             "eventLog": str(session.event_log),
             "summaryPath": str(session.summary),
@@ -204,6 +219,13 @@ class ArtifactMonitorService:
                     )
             evidence_root.mkdir(parents=True, exist_ok=False)
             temp_root.mkdir(parents=True, exist_ok=False)
+            for directory_name in (
+                "tmp",
+                "torch-home",
+                "xdg-cache",
+                "matplotlib",
+            ):
+                (temp_root / directory_name).mkdir()
 
             event_log = evidence_root / "events.jsonl"
             summary = evidence_root / "summary.json"
@@ -372,8 +394,7 @@ class ArtifactMonitorService:
                 raise RuntimeError(
                     f"训练对应的文件监控会话不健康: {session.session_id}"
                 )
-            temp_dir = str(session.temp_root)
-            return {"TMPDIR": temp_dir, "TMP": temp_dir, "TEMP": temp_dir}
+            return self._temporary_environment(session)
 
 
 MONITOR_SERVICE = ArtifactMonitorService()

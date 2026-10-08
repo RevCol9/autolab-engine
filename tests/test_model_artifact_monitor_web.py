@@ -116,6 +116,9 @@ class ArtifactMonitorWebServiceTest(unittest.TestCase):
             environment = self.service.environment_for(self.run_root)
             self.assertEqual(started["tempDir"], environment["TMPDIR"])
             self.assertEqual(environment["TMPDIR"], environment["TMP"])
+            self.assertEqual(environment, started["environment"])
+            self.assertTrue(Path(environment["TMPDIR"]).is_dir())
+            self.assertTrue(Path(environment["TORCH_HOME"]).is_dir())
 
             page = self.service.events(after_sequence=1, limit=10)
             self.assertEqual(1, page["count"])
