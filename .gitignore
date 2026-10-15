@@ -1,6 +1,4 @@
-# docs / readme（本地维护，不入库）
-README.md
-README*.md
+# local working notes
 docs/
 
 # local config / secrets
@@ -8,9 +6,17 @@ docs/
 .env.*
 !.env.example
 config/annotation.yaml
+config/model_crypto.yaml
 config/training/base.yaml
 config/training/detection.yaml
 config/training/segmentation.yaml
+keys/
+keyring/
+*.key
+*.pem
+*.p12
+*.pfx
+kek_id.txt
 
 # python
 __pycache__/
@@ -34,12 +40,19 @@ logs/
 tmp/
 uploads/
 outputs/
+dist/
+release/
+validation/
+validation-*/
 
 # weights
 weights/**
 !weights/.gitkeep
+*.niii-model
+*.niii-model.tmp*
 *.pt
 *.pth
 *.onnx
 *.engine
 *.ckpt
+*.safetensors

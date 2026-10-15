@@ -1,15 +1,13 @@
 # autolab-engine 架构说明
 
-详细说明见本地 [`docs/architecture.md`](docs/architecture.md)、
-[`docs/data-transfer.md`](docs/data-transfer.md)、[`docs/roadmap.md`](docs/roadmap.md)
-（`docs/` 不入库）。
+使用与部署入口见 [README.md](README.md)，加密权重边界见[training/WEIGHTS.md](training/WEIGHTS.md)。
 
 本仓库提供两个独立 HTTP 服务，由 systemd 分别管理：
 
-| 服务 | 入口 | 默认端口 | 配置文件 |
-|------|------|----------|----------|
-| 推理/标注 | `run.py` → `api/inference.py` | 21010 | `config/annotation.yaml` |
-| 训练 | `training/run.py` → `api/train.py` | 21011 | `config/training/base.yaml` + 按任务拆分的 YAML |
+| 服务      | 入口                                    | 默认端口 | 配置文件                                          |
+| --------- | --------------------------------------- | -------- | ------------------------------------------------- |
+| 推理/标注 | `run.py` → `api/inference.py`      | 21010    | `config/annotation.yaml`                        |
+| 训练      | `training/run.py` → `api/train.py` | 21011    | `config/training/base.yaml` + 按任务拆分的 YAML |
 
 环境变量：`ANNOTATION_CONFIG_PATH`（推理）、`TRAINING_DETECTION_CONFIG_PATH` /
 `TRAINING_SEGMENTATION_CONFIG_PATH`（按任务覆盖 YAML）。兼容的
@@ -87,12 +85,12 @@ POST /api/v1/.../train/detection action=start (api/train.py)
 
 ## 配置分工
 
-| 文件 | 内容 |
-|------|------|
-| `config/annotation.yaml` | `server`、各 `models[].device`、`gpu`、`locate`、`postprocess` |
-| `config/training/base.yaml` | 训练 `server`、`device`、`gpu` |
-| `config/training/detection.yaml` | 检测任务的 `epochs`/`batch`/… Ultralytics 默认项 |
-| `config/training/segmentation.yaml` | 分割任务的 Ultralytics 默认项 |
+| 文件                                  | 内容                                                                     |
+| ------------------------------------- | ------------------------------------------------------------------------ |
+| `config/annotation.yaml`            | `server`、各 `models[].device`、`gpu`、`locate`、`postprocess` |
+| `config/training/base.yaml`         | 训练`server`、`device`、`gpu`                                      |
+| `config/training/detection.yaml`    | 检测任务的`epochs`/`batch`/… Ultralytics 默认项                     |
+| `config/training/segmentation.yaml` | 分割任务的 Ultralytics 默认项                                            |
 
 双卡训推分离：推理 `models[].device: cuda:0`，训练 `base.yaml` 里 `device: "1"`。
 
